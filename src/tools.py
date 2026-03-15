@@ -127,8 +127,20 @@ def notion_tool(tool_name: str, arguments: dict) -> str:
 
 # Cargar tools de Notion dinámicamente
 _notion_tools = []
+_notion_tool_names = []
 try:
-    _notion_tools = notion_mcp.list_tools()
+    _raw_notion_tools = notion_mcp.list_tools()
+    # Convertir formato MCP → formato LiteLLM
+    for t in _raw_notion_tools:
+        _notion_tools.append({
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "parameters": t.get("inputSchema", {"type": "object", "properties": {}}),
+            },
+        })
+        _notion_tool_names.append(t["name"])
 except Exception:
     pass
 
@@ -140,6 +152,5 @@ TOOL_MAP = {
     "create_spec": lambda args: create_spec(args["title"], args["content"]),
     "read_file": lambda args: read_file(args["path"]),
     "write_file": lambda args: write_file(args["path"], args["content"]),
-    **{t["function"]["name"]: lambda args, n=t["function"]["name"]: notion_tool(n, args)
-       for t in _notion_tools},
+    **{name: lambda args, n=name: notion_tool(n, args) for name in _notion_tool_names},
 }
