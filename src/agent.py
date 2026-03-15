@@ -11,7 +11,6 @@ from src.executor import (
     execute_tool_call, _safe_parse_args,
     cancel, reset, is_cancelled, MAX_ITERATIONS
 )
-
 MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-chat")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -133,8 +132,11 @@ def run_agent(user_message: str, progress_callback=None) -> str:
 
     # Coder: delegar subtareas si la spec las define
     if is_complex:
+        from src.coder import run_coder
+        from src.reviewer import run_reviewer, format_review
         spec = generate_spec(user_message)
         subtasks = spec.get("subtasks", [])
+        criteria = spec.get("acceptance_criteria", [])
         if subtasks:
             context = f"Spec:\n{spec_summary}\n\nAnálisis:\n{analysis}"
             all_modified = []
@@ -147,7 +149,20 @@ def run_agent(user_message: str, progress_callback=None) -> str:
                 all_modified.extend(result.get("modified_files", []))
                 if progress_callback:
                     progress_callback(f"✅ Subtarea {i} lista. Archivos: {result.get('modified_files', [])}")
-            return f"✅ Tarea compleja completada.\nArchivos modificados: {list(set(all_modified))}"
+
+            # Reviewer: verificar que los cambios cumplen la spec
+            if progress_callback:
+                progress_callback("🔍 Revisando cambios...")
+            review = run_reviewer(spec_summary, list(set(all_modified)), criteria)
+            review_msg = format_review(review)
+            if progress_callback:
+                progress_callback(review_msg)
+
+            return (
+                f"✅ Tarea compleja completada.\n"
+                f"Archivos modificados: {list(set(all_modified))}\n\n"
+                f"{review_msg}"
+            )
 
     # Tarea simple: loop directo
     memories = load_memory(user_message)
