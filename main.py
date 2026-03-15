@@ -3,7 +3,7 @@ import asyncio
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
-from src.agent import run_agent
+from src.agent import run_agent, cancel as cancel_agent
 from src.scheduler import set_send_callback
 
 load_dotenv()
@@ -42,14 +42,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global _current_task
     if update.effective_user.id != ALLOWED_USER:
         return
-    if _current_task and not _current_task.done():
-        _current_task.cancel()
-        await update.message.reply_text("⛔ Cancelando tarea en curso...")
-    else:
-        await update.message.reply_text("ℹ️ No hay ninguna tarea en curso.")
+    cancel_agent()
+    await update.message.reply_text("⛔ Señal de cancelación enviada al agente.")
 
 
 def main():

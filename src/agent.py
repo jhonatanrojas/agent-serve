@@ -1,5 +1,6 @@
 import os
 import json
+import threading
 import litellm
 from src.tools import TOOLS, TOOL_MAP
 from src.memory import search_memory
@@ -20,9 +21,25 @@ Responde siempre en español. Sé conciso y reporta cada acción que realizas.
 
 {memories}"""
 
+# Flag global de cancelación
+_cancel_event = threading.Event()
+
+
+def cancel():
+    _cancel_event.set()
+
+
+def reset():
+    _cancel_event.clear()
+
+
+def is_cancelled():
+    return _cancel_event.is_set()
+
 
 def run_agent(user_message: str, progress_callback=None) -> str:
-    # Recuperar memorias relevantes
+    reset()
+
     memories = search_memory(user_message)
     system = SYSTEM_PROMPT.format(
         memories=f"\nMemorias relevantes:\n{memories}" if "Sin memorias" not in memories else ""
@@ -34,6 +51,9 @@ def run_agent(user_message: str, progress_callback=None) -> str:
     ]
 
     while True:
+        if is_cancelled():
+            return "⛔ Tarea cancelada por el usuario."
+
         response = litellm.completion(
             model=MODEL,
             messages=messages,
@@ -48,6 +68,9 @@ def run_agent(user_message: str, progress_callback=None) -> str:
             return msg.content
 
         for tc in msg.tool_calls:
+            if is_cancelled():
+                return "⛔ Tarea cancelada por el usuario."
+
             name = tc.function.name
             args = json.loads(tc.function.arguments)
 
