@@ -3,6 +3,10 @@ import git
 from pathlib import Path
 from src.notion import notion_mcp
 from src.serena import serena_mcp
+from src.memory import add_memory, search_memory, get_all_memories
+from src.search import web_search
+from src.database import sql_query, list_tables
+from src.scheduler import schedule_task, list_tasks, remove_task
 
 REPO_PATH = os.getenv("REPO_PATH", "/root/agent-serve")
 
@@ -120,6 +124,15 @@ TOOLS = [
             },
         },
     },
+    {"type": "function", "function": {"name": "add_memory", "description": "Guarda una memoria persistente sobre el usuario o proyecto", "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}},
+    {"type": "function", "function": {"name": "search_memory", "description": "Busca memorias relevantes por query", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
+    {"type": "function", "function": {"name": "get_all_memories", "description": "Lista todas las memorias guardadas", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "web_search", "description": "Busca información en internet con DuckDuckGo", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "max_results": {"type": "integer", "default": 5}}, "required": ["query"]}}},
+    {"type": "function", "function": {"name": "sql_query", "description": "Ejecuta una query SQL en la base de datos SQLite local", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
+    {"type": "function", "function": {"name": "list_tables", "description": "Lista las tablas de la base de datos SQLite", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "schedule_task", "description": "Programa una tarea recurrente con expresión cron", "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}, "cron_expr": {"type": "string", "description": "5 campos: minuto hora día mes día_semana. Ej: '0 9 * * 1' = lunes 9am"}, "command": {"type": "string"}}, "required": ["task_id", "cron_expr", "command"]}}},
+    {"type": "function", "function": {"name": "list_tasks", "description": "Lista las tareas programadas", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "remove_task", "description": "Elimina una tarea programada", "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}}},
 ]
 
 def notion_tool(tool_name: str, arguments: dict) -> str:
@@ -159,6 +172,15 @@ TOOL_MAP = {
     "create_spec": lambda args: create_spec(args["title"], args["content"]),
     "read_file": lambda args: read_file(args["path"]),
     "write_file": lambda args: write_file(args["path"], args["content"]),
+    "add_memory": lambda args: add_memory(args["text"]),
+    "search_memory": lambda args: search_memory(args["query"]),
+    "get_all_memories": lambda args: get_all_memories(),
+    "web_search": lambda args: web_search(args["query"], args.get("max_results", 5)),
+    "sql_query": lambda args: sql_query(args["query"]),
+    "list_tables": lambda args: list_tables(),
+    "schedule_task": lambda args: schedule_task(args["task_id"], args["cron_expr"], args["command"]),
+    "list_tasks": lambda args: list_tasks(),
+    "remove_task": lambda args: remove_task(args["task_id"]),
     **{name: lambda args, n=name: notion_tool(n, args) for name in _notion_tool_names},
     **{name: lambda args, n=name: serena_tool(n, args) for name in _serena_tool_names},
 }

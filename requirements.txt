@@ -1,5 +1,8 @@
 litellm
-python-telegram-bot
+python-telegram-bot[webhooks]
 gitpython
 mcp
 python-dotenv
+mem0ai
+duckduckgo-search
+apscheduler
