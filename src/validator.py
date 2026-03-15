@@ -8,11 +8,11 @@ VENV_BIN = REPO_PATH / "venv" / "bin"
 log = logging.getLogger("validator")
 
 
-def _run(cmd: list, cwd=None) -> tuple[int, str]:
+def _run(cmd: list, cwd=None, timeout: int = 30) -> tuple[int, str]:
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True,
-            cwd=str(cwd or REPO_PATH), timeout=30
+            cwd=str(cwd or REPO_PATH), timeout=timeout
         )
         output = (result.stdout + result.stderr).strip()
         return result.returncode, output
@@ -28,7 +28,6 @@ def run_lint(files: list[str]) -> dict:
     if not py_files:
         return {"tool": "lint", "passed": True, "output": "Sin archivos Python que revisar"}
 
-    # Intentar ruff primero, luego flake8
     ruff = str(VENV_BIN / "ruff")
     flake8 = str(VENV_BIN / "flake8")
 
@@ -89,10 +88,68 @@ def run_syntax_check(files: list[str]) -> dict:
     }
 
 
+def _discover_related_tests(modified_files: list[str]) -> list[str]:
+    """Mapea archivos modificados a tests cercanos: tests/**/test_<stem>.py o *test*.py relacionados."""
+    tests_root = REPO_PATH / "tests"
+    if not tests_root.exists():
+        return []
+
+    candidates: set[str] = set()
+    all_tests = [p for p in tests_root.rglob("test_*.py") if p.is_file()]
+    for rel in modified_files:
+        p = Path(rel)
+        stem = p.stem
+        parent_parts = [part for part in p.parts if part not in {"src", "app"}]
+
+        for t in all_tests:
+            t_rel = t.relative_to(REPO_PATH)
+            t_str = str(t_rel)
+            if stem and (f"test_{stem}.py" in t_str or stem in t_str):
+                candidates.add(t_str)
+                continue
+
+            if any(part and part in t_str for part in parent_parts[-2:]):
+                candidates.add(t_str)
+
+    return sorted(candidates)
+
+
+def run_related_tests(modified_files: list[str]) -> dict:
+    """Ejecuta tests relacionados al área modificada usando pytest por archivo."""
+    related_tests = _discover_related_tests(modified_files)
+    if not related_tests:
+        return {
+            "tool": "tests_related",
+            "passed": True,
+            "output": "Sin tests relacionados detectados",
+            "related_tests": [],
+        }
+
+    pytest_bin = str(VENV_BIN / "pytest")
+    cmd = [pytest_bin, "-q", *related_tests]
+    code, output = _run(cmd, timeout=90)
+
+    if "Comando no encontrado" in output:
+        return {
+            "tool": "tests_related",
+            "passed": True,
+            "output": "Pytest no disponible; omitiendo tests relacionados",
+            "related_tests": related_tests,
+        }
+
+    return {
+        "tool": "tests_related",
+        "passed": code == 0,
+        "output": output[:800] or "Sin salida",
+        "related_tests": related_tests,
+    }
+
+
 def run_validation(modified_files: list[str]) -> dict:
     """
-    Ejecuta todas las validaciones disponibles sobre los archivos modificados.
-    Retorna resumen con passed/failed por herramienta.
+    Ejecuta validaciones incrementales sobre archivos modificados:
+    - sintaxis/lint/typecheck incremental
+    - tests relacionados al área modificada
     """
     if not modified_files:
         return {"passed": True, "checks": [], "summary": "Sin archivos que validar"}
@@ -101,6 +158,7 @@ def run_validation(modified_files: list[str]) -> dict:
         run_syntax_check(modified_files),
         run_lint(modified_files),
         run_type_check(modified_files),
+        run_related_tests(modified_files),
     ]
 
     all_passed = all(c["passed"] for c in checks)
