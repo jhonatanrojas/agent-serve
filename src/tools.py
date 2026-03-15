@@ -2,6 +2,7 @@ import os
 import git
 from pathlib import Path
 from src.notion import notion_mcp
+from src.serena import serena_mcp
 
 REPO_PATH = os.getenv("REPO_PATH", "/root/agent-serve")
 
@@ -125,26 +126,32 @@ def notion_tool(tool_name: str, arguments: dict) -> str:
     return notion_mcp.call_tool(tool_name, arguments)
 
 
-# Cargar tools de Notion dinámicamente
-_notion_tools = []
-_notion_tool_names = []
-try:
-    _raw_notion_tools = notion_mcp.list_tools()
-    # Convertir formato MCP → formato LiteLLM
-    for t in _raw_notion_tools:
-        _notion_tools.append({
-            "type": "function",
-            "function": {
-                "name": t["name"],
-                "description": t.get("description", ""),
-                "parameters": t.get("inputSchema", {"type": "object", "properties": {}}),
-            },
-        })
-        _notion_tool_names.append(t["name"])
-except Exception:
-    pass
+def serena_tool(tool_name: str, arguments: dict) -> str:
+    return serena_mcp.call_tool(tool_name, arguments)
 
-TOOLS = TOOLS + _notion_tools
+
+def _load_mcp_tools(mcp_client):
+    tools, names = [], []
+    try:
+        for t in mcp_client.list_tools():
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "parameters": t.get("inputSchema", {"type": "object", "properties": {}}),
+                },
+            })
+            names.append(t["name"])
+    except Exception:
+        pass
+    return tools, names
+
+
+_notion_tools, _notion_tool_names = _load_mcp_tools(notion_mcp)
+_serena_tools, _serena_tool_names = _load_mcp_tools(serena_mcp)
+
+TOOLS = TOOLS + _notion_tools + _serena_tools
 
 TOOL_MAP = {
     "git_pull": lambda args: git_pull(),
@@ -153,4 +160,5 @@ TOOL_MAP = {
     "read_file": lambda args: read_file(args["path"]),
     "write_file": lambda args: write_file(args["path"], args["content"]),
     **{name: lambda args, n=name: notion_tool(n, args) for name in _notion_tool_names},
+    **{name: lambda args, n=name: serena_tool(n, args) for name in _serena_tool_names},
 }
