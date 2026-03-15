@@ -22,4 +22,4 @@ Construir un agente en segundo plano que:
 - [x] Conectar bot Telegram con el agente
 - [x] Envío de avances/progreso por Telegram
 - [x] Ejecutar agente como servicio en segundo plano (systemd)
-- [ ] Pruebas end-to-end
+- [x] Pruebas end-to-end
