@@ -15,9 +15,9 @@ Construir un agente en segundo plano que:
 - [x] Configurar SSH a GitHub
 - [x] Crear estructura del proyecto
 - [x] Configurar entorno Python (venv + dependencias)
-- [ ] Crear bot de Telegram y obtener token
-- [ ] Implementar agente con LiteLLM (soporte multi-proveedor)
-- [ ] Implementar tools: git_pull, git_push, create_spec
+- [x] Crear bot de Telegram y obtener token
+- [x] Implementar agente con LiteLLM (soporte multi-proveedor)
+- [x] Implementar tools: git_pull, git_push, create_spec
 - [ ] Integrar Notion MCP server
 - [ ] Conectar bot Telegram con el agente
 - [ ] Envío de avances/progreso por Telegram
