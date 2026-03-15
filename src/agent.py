@@ -11,13 +11,10 @@ from src.task_context import TaskContext
 MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-chat")
 MAX_ITERATIONS = int(os.getenv("AGENT_MAX_ITERATIONS", "20"))
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("agent")
 
-SYSTEM_PROMPT = """Eres un agente de desarrollo autónomo. Puedes:
+_SYSTEM_BASE = """Eres un agente de desarrollo autónomo. Puedes:
 - Hacer git pull y git push
 - Crear specs de cambios
 - Leer y escribir archivos
@@ -27,9 +24,7 @@ SYSTEM_PROMPT = """Eres un agente de desarrollo autónomo. Puedes:
 - Programar tareas recurrentes con cron
 - Interactuar con Notion y analizar código con Serena
 
-Responde siempre en español. Sé conciso y reporta cada acción que realizas.
-
-{memories}"""
+Responde siempre en español. Sé conciso y reporta cada acción que realizas."""
 
 _cancel_event = threading.Event()
 
@@ -46,131 +41,149 @@ def is_cancelled():
     return _cancel_event.is_set()
 
 
-def _validate_args(tool_name: str, args: dict) -> str | None:
-    """Retorna mensaje de error si los args son inválidos, None si son válidos."""
-    tool_def = next((t for t in TOOLS if t["function"]["name"] == tool_name), None)
-    if not tool_def:
-        return f"Tool desconocida: {tool_name}"
-    required = tool_def["function"].get("parameters", {}).get("required", [])
-    missing = [r for r in required if r not in args]
-    if missing:
-        return f"Argumentos faltantes en `{tool_name}`: {missing}"
-    return None
+# ── Responsabilidades separadas ──────────────────────────────────────────────
+
+def load_memory(query: str) -> str:
+    """Recupera memorias relevantes para el mensaje del usuario."""
+    return search_memory(query)
 
 
-def _execute_tool(tc) -> str:
+def build_system_prompt(memories: str) -> str:
+    """Construye el system prompt inyectando memorias si las hay."""
+    if memories and "Sin memorias" not in memories:
+        return _SYSTEM_BASE + f"\n\nMemorias relevantes:\n{memories}"
+    return _SYSTEM_BASE
+
+
+def call_model(messages: list) -> object:
+    """Llama al LLM y retorna el mensaje de respuesta. Lanza excepción si falla."""
+    response = litellm.completion(
+        model=MODEL,
+        messages=messages,
+        tools=TOOLS,
+        tool_choice="auto",
+    )
+    return response.choices[0].message
+
+
+def execute_tool_call(tc) -> tuple[str, dict, str]:
+    """
+    Ejecuta una tool call. Retorna (name, args, result).
+    Nunca lanza excepción — los errores se retornan como string.
+    """
     name = tc.function.name
     try:
         args = json.loads(tc.function.arguments)
     except json.JSONDecodeError as e:
         log.error("JSON inválido en tool %s: %s", name, e)
-        return f"Error: argumentos JSON inválidos en `{name}`"
+        return name, {}, f"Error: argumentos JSON inválidos en `{name}`"
 
-    validation_error = _validate_args(name, args)
-    if validation_error:
-        log.warning("Validación fallida: %s", validation_error)
-        return validation_error
+    # Validar argumentos requeridos
+    tool_def = next((t for t in TOOLS if t["function"]["name"] == name), None)
+    if tool_def:
+        required = tool_def["function"].get("parameters", {}).get("required", [])
+        missing = [r for r in required if r not in args]
+        if missing:
+            log.warning("Args faltantes en %s: %s", name, missing)
+            return name, args, f"Argumentos faltantes en `{name}`: {missing}"
 
     try:
         log.info("Ejecutando tool: %s args=%s", name, args)
         result = TOOL_MAP[name](args)
-        log.info("Tool %s completada: %s", name, str(result)[:120])
-        return result
+        log.info("Tool %s OK: %s", name, str(result)[:120])
+        return name, args, result
     except Exception as e:
         log.error("Error en tool %s: %s", name, e)
-        return f"Error ejecutando `{name}`: {e}"
+        return name, args, f"Error ejecutando `{name}`: {e}"
 
 
-def run_agent(user_message: str, progress_callback=None) -> str:
-    reset()
-    guard = LoopGuard()
-    ctx = TaskContext(message=user_message)
-    log.info("Iniciando agente. Mensaje: %s", user_message[:100])
-
-    memories = search_memory(user_message)
-    system = SYSTEM_PROMPT.format(
-        memories=f"\nMemorias relevantes:\n{memories}" if "Sin memorias" not in memories else ""
-    )
-
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user_message},
-    ]
-
+def run_agent_loop(messages: list, ctx: TaskContext, guard: LoopGuard,
+                   progress_callback=None) -> str:
+    """Loop principal del agente. Retorna la respuesta final."""
     for iteration in range(MAX_ITERATIONS):
         ctx.iterations = iteration + 1
 
         if is_cancelled():
-            log.info("Agente cancelado en iteración %d", iteration)
+            log.info("Cancelado en iteración %d", iteration)
             ctx.finish("cancelled")
             return "⛔ Tarea cancelada por el usuario.\n\n" + ctx.summary()
 
         log.info("Iteración %d/%d", iteration + 1, MAX_ITERATIONS)
 
         try:
-            response = litellm.completion(
-                model=MODEL,
-                messages=messages,
-                tools=TOOLS,
-                tool_choice="auto",
-            )
+            msg = call_model(messages)
         except Exception as e:
-            log.error("Error llamando al LLM: %s", e)
+            log.error("Error LLM: %s", e)
             ctx.finish("error", str(e))
             return f"Error al llamar al modelo: {e}"
 
-        msg = response.choices[0].message
         messages.append(msg.model_dump(exclude_none=True))
 
         if not msg.tool_calls:
-            log.info("Agente completó en iteración %d", iteration + 1)
+            log.info("Completado en iteración %d", iteration + 1)
             ctx.finish("completed")
             return msg.content
 
         for tc in msg.tool_calls:
             if is_cancelled():
-                log.info("Agente cancelado durante tool calls")
                 ctx.finish("cancelled")
                 return "⛔ Tarea cancelada por el usuario.\n\n" + ctx.summary()
 
             name = tc.function.name
-            try:
-                args = json.loads(tc.function.arguments)
-            except json.JSONDecodeError as e:
-                log.error("JSON inválido en tool %s: %s", name, e)
-                args = {}
 
-            loop_error = guard.record_call(name, args)
-            if loop_error:
-                log.warning("Loop detectado en tool %s", name)
-                ctx.finish("loop_detected", loop_error)
+            # Guardrail pre-ejecución
+            loop_err = guard.record_call(name, _safe_parse_args(tc))
+            if loop_err:
+                ctx.finish("loop_detected", loop_err)
                 if progress_callback:
-                    progress_callback(loop_error)
-                return loop_error + "\n\n" + ctx.summary()
+                    progress_callback(loop_err)
+                return loop_err + "\n\n" + ctx.summary()
 
             if progress_callback:
                 progress_callback(f"⚙️ Ejecutando: `{name}`")
 
-            result = _execute_tool(tc)
+            name, args, result = execute_tool_call(tc)
             ctx.record_tool(name, args, result, iteration + 1)
 
-            loop_error = guard.record_result(name, result)
-            if loop_error:
-                log.warning("Resultado repetido en tool %s", name)
-                ctx.finish("loop_detected", loop_error)
+            # Guardrail post-ejecución
+            loop_err = guard.record_result(name, result)
+            if loop_err:
+                ctx.finish("loop_detected", loop_err)
                 if progress_callback:
-                    progress_callback(loop_error)
-                return loop_error + "\n\n" + ctx.summary()
+                    progress_callback(loop_err)
+                return loop_err + "\n\n" + ctx.summary()
 
             if progress_callback:
                 progress_callback(f"✅ `{name}`: {result[:200]}")
 
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "content": result,
-            })
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
 
     log.warning("Límite de iteraciones alcanzado (%d)", MAX_ITERATIONS)
     ctx.finish("limit_reached")
-    return f"⚠️ Se alcanzó el límite de {MAX_ITERATIONS} iteraciones.\n\n" + ctx.summary()
+    return f"⚠️ Límite de {MAX_ITERATIONS} iteraciones alcanzado.\n\n" + ctx.summary()
+
+
+def _safe_parse_args(tc) -> dict:
+    try:
+        return json.loads(tc.function.arguments)
+    except Exception:
+        return {}
+
+
+# ── Punto de entrada público ─────────────────────────────────────────────────
+
+def run_agent(user_message: str, progress_callback=None) -> str:
+    reset()
+    ctx = TaskContext(message=user_message)
+    guard = LoopGuard()
+    log.info("Iniciando agente: %s", user_message[:100])
+
+    memories = load_memory(user_message)
+    system = build_system_prompt(memories)
+
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_message},
+    ]
+
+    return run_agent_loop(messages, ctx, guard, progress_callback)
