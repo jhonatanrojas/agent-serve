@@ -1,0 +1,15 @@
+[Unit]
+Description=Agent Server - Telegram + LiteLLM + Notion MCP + Serena MCP
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/agent-serve
+EnvironmentFile=/root/agent-serve/.env
+ExecStart=/root/agent-serve/venv/bin/python3 main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
