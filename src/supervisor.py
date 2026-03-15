@@ -202,7 +202,7 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
         criteria = state.spec.get("acceptance_criteria", [])
         state.review = run_reviewer(state.spec_summary, state.modified_files, criteria)
         if state.review.get("verdict") in ("RECHAZADO", "PARCIAL"):
-            append_event(run_id, "review_rejected", "reviewing", {"verdict": state.review.get("verdict", ""), "issues": state.review.get("issues", [])[:5]})
+            append_event(run_id, "review_rejected", "reviewing", {"verdict": state.review.get("verdict", ""), "issues": state.review.get("issues", [])[:5], "required_fixes": state.review.get("required_fixes", [])[:5]})
         review_msg = format_review(state.review)
         notify(review_msg)
 
