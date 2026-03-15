@@ -1,0 +1,5 @@
+litellm
+python-telegram-bot
+gitpython
+mcp
+python-dotenv
