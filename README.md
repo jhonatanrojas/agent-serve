@@ -2,6 +2,44 @@
 
 Agente autónomo que recibe instrucciones via Telegram, ejecuta tareas de desarrollo y reporta avances en tiempo real.
 
+## Arquitectura
+
+```
+run_agent()
+  ├── run_supervisor()        [tareas complejas]
+  │     ├── planner           → clasifica complejidad, genera spec
+  │     ├── analyst           → escanea codebase, evalúa impacto
+  │     ├── coder             → implementa subtareas (scope acotado)
+  │     ├── reviewer          → verifica criterios de aceptación
+  │     └── validator         → lint (ruff) + syntax check
+  └── run_agent_loop()        [tareas simples]
+        └── guardrails: loop guard + /stop + MAX_ITERATIONS
+```
+
+### Módulos
+
+| Módulo | Responsabilidad |
+|--------|----------------|
+| `src/agent.py` | Punto de entrada, orquesta supervisor o loop directo |
+| `src/supervisor.py` | Controla flujo entre subagentes, detecta loops |
+| `src/planner.py` | Clasifica complejidad, genera spec estructurada |
+| `src/analyst.py` | Escanea repo, identifica archivos relevantes, evalúa impacto |
+| `src/coder.py` | Implementa subtareas con tools limitadas a escritura de código |
+| `src/reviewer.py` | Verifica criterios de aceptación post-coder |
+| `src/validator.py` | Lint (ruff) + syntax check sobre archivos modificados |
+| `src/executor.py` | `execute_tool_call`, cancel/reset, MAX_ITERATIONS (compartido) |
+| `src/loop_guard.py` | Detecta repetición de tool calls y resultados |
+| `src/task_context.py` | Estado formal de tarea: status, historial, archivos modificados |
+| `src/tools.py` | Definición y registro de todas las tools disponibles |
+| `src/memory.py` | Memoria persistente entre conversaciones (SQLite) |
+| `src/database.py` | Queries SQL sobre base de datos local |
+| `src/search.py` | Búsqueda web con DuckDuckGo |
+| `src/scheduler.py` | Tareas programadas con APScheduler |
+| `src/notion.py` | Cliente Notion MCP (22 tools) |
+| `src/serena.py` | Cliente Serena MCP (27 tools de coding semántico) |
+
+---
+
 ## Stack
 
 - **LiteLLM** — soporte multi-proveedor (DeepSeek, Claude, GPT-4)
@@ -9,10 +47,11 @@ Agente autónomo que recibe instrucciones via Telegram, ejecuta tareas de desarr
 - **GitPython** — git pull / git push automático
 - **Notion MCP** — integración con Notion via MCP
 - **Serena MCP** — coding semántico (find_symbol, replace_content, etc.)
-- **Memoria SQLite** — memoria persistente entre conversaciones (sin dependencias externas)
-- **DuckDuckGo Search** — búsqueda web sin API key ni registro
+- **Memoria SQLite** — memoria persistente entre conversaciones
+- **DuckDuckGo Search** — búsqueda web sin API key
 - **APScheduler** — tareas programadas con cron desde Telegram
 - **SQLite DB** — base de datos local para el agente
+- **ruff** — linter para validación técnica post-cambios
 - **systemd** — servicio en segundo plano
 
 ---
@@ -62,7 +101,6 @@ git config --global user.email "tu@email.com"
 apt install -y python3.10-venv
 python3 -m venv venv
 venv/bin/pip install -r requirements.txt
-venv/bin/pip install "python-telegram-bot[webhooks]"
 ```
 
 ### 5. Instalar Notion MCP
@@ -77,19 +115,12 @@ npm install -g @notionhq/notion-mcp-server
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-Verificar que Serena funciona (descarga automática en primer uso):
-```bash
-~/.local/bin/uvx --from git+https://github.com/oraios/serena serena start-mcp-server --help
-```
-
 ### 7. Configurar variables de entorno
 
 ```bash
 cp .env.example .env
 nano .env
 ```
-
-Completar el archivo `.env`:
 
 ```env
 # LLM — elegir uno
@@ -107,37 +138,21 @@ TELEGRAM_TOKEN=         # Token de @BotFather
 TELEGRAM_ALLOWED_USER=  # Tu chat ID (obtener con @userinfobot)
 
 # Notion
-NOTION_API_KEY=ntn_...  # Notion Integration Token
+NOTION_API_KEY=ntn_...
 
 # Repositorio que gestionará el agente
 REPO_PATH=/ruta/al/repo
+
+# Guardrails (opcional)
+AGENT_MAX_ITERATIONS=20
+AGENT_MAX_SAME_TOOL_CALLS=3
+AGENT_MAX_SAME_RESULT=2
 ```
-
-#### Obtener credenciales
-
-**Telegram Bot Token:**
-1. Hablar con [@BotFather](https://t.me/BotFather)
-2. Enviar `/newbot` y seguir los pasos
-3. Copiar el token
-
-**Telegram Chat ID:**
-1. Hablar con [@userinfobot](https://t.me/userinfobot)
-2. Copiar el `Id`
-
-**DeepSeek API Key:**
-- [platform.deepseek.com](https://platform.deepseek.com) → API Keys
-
-**Notion Integration Token:**
-1. Ir a [notion.so/my-integrations](https://www.notion.so/my-integrations)
-2. Crear nueva integración
-3. Copiar el token `ntn_...`
-4. Compartir las páginas/bases de datos con la integración
 
 ### 8. Instalar servicio systemd
 
 ```bash
 cp agent-serve.service /etc/systemd/system/
-# Editar WorkingDirectory y EnvironmentFile si el path es diferente a /root/agent-serve
 systemctl daemon-reload
 systemctl enable agent-serve
 systemctl start agent-serve
@@ -153,68 +168,67 @@ journalctl -u agent-serve -f
 
 ## Uso
 
-Enviar mensajes al bot de Telegram. Ejemplos:
+Enviar mensajes al bot de Telegram:
 
 ```
 haz git pull y dime el estado del repo
-crea una spec para agregar autenticación JWT
-busca el símbolo UserService en el código
-actualiza el archivo README con los nuevos endpoints
-haz commit y push con el mensaje "feat: nueva funcionalidad"
-crea una página en Notion con el resumen de los cambios
+refactoriza el módulo de autenticación          ← tarea compleja: activa supervisor
+busca en internet las últimas versiones de FastAPI
+recuerda que prefiero commits en inglés
+programa un git pull diario a las 8am
+crea una tabla de tareas en la base de datos
 ```
 
-## Tools disponibles
+### Comando especial
 
-| Tool | Descripción |
-|------|-------------|
-| `git_pull` | Sincroniza el repo con el remoto |
-| `git_push` | Commit + push con mensaje |
-| `create_spec` | Crea archivo `.md` en `specs/` |
-| `read_file` | Lee un archivo |
-| `write_file` | Escribe un archivo |
-| `add_memory` | Guarda una memoria persistente |
-| `search_memory` | Busca memorias relevantes |
-| `get_all_memories` | Lista todas las memorias |
-| `web_search` | Busca en internet con DuckDuckGo |
-| `sql_query` | Ejecuta SQL en la DB local |
-| `list_tables` | Lista tablas de la DB |
-| `schedule_task` | Programa tarea con cron |
-| `list_tasks` | Lista tareas programadas |
-| `remove_task` | Elimina tarea programada |
-| Notion (22) | CRUD páginas, bases de datos, bloques |
-| Serena (27) | Búsqueda y edición semántica de código |
+| Comando | Acción |
+|---------|--------|
+| `/stop` | Cancela la tarea en curso inmediatamente |
 
-## Ejemplos de uso por componente
+---
 
-**Memoria:**
-```
-recuerda que el repo principal es mi-proyecto
-¿qué recuerdas sobre el proyecto?
-```
+## Tools disponibles (63 total)
 
-**Búsqueda web:**
-```
-busca en internet cómo implementar JWT en FastAPI
-```
+| Categoría | Tools |
+|-----------|-------|
+| Git | `git_pull`, `git_push` |
+| Archivos | `read_file`, `write_file`, `create_spec` |
+| Memoria | `add_memory`, `search_memory`, `get_all_memories` |
+| Búsqueda | `web_search` |
+| Base de datos | `sql_query`, `list_tables` |
+| Crons | `schedule_task`, `list_tasks`, `remove_task` |
+| Notion | 22 tools (CRUD páginas, bases de datos, bloques) |
+| Serena | 27 tools (búsqueda y edición semántica de código) |
 
-**Base de datos:**
-```
-crea una tabla de tareas con id, titulo y estado
-lista todas las tareas pendientes
-```
+---
 
-**Crons:**
-```
-programa una tarea "daily-pull" para hacer git pull todos los días a las 8am
-lista las tareas programadas
-elimina la tarea "daily-pull"
-```
-Formato cron: `"minuto hora día mes día_semana"` — ej: `"0 8 * * *"` = todos los días a las 8am
+## Guardrails
+
+| Guardrail | Comportamiento |
+|-----------|---------------|
+| `MAX_ITERATIONS` | Corta el loop tras N iteraciones (default: 20) |
+| Loop de tool calls | Detecta misma tool+args repetida >3 veces |
+| Loop de resultados | Detecta mismo resultado repetido >2 veces |
+| Loop de subagentes | Detecta mismo subagente invocado >2 veces sin progreso |
+| `/stop` | Cancela inmediatamente via `threading.Event` |
+
+---
+
+## Flujo para tareas complejas
+
+Cuando el agente detecta palabras clave como `refactor`, `arquitectura`, `integrar`, `migrar`, etc., activa el supervisor:
+
+1. **Planner** — genera spec con objetivo, subtareas y criterios de aceptación → guardada en `specs/`
+2. **Analyst** — escanea el repo, identifica archivos relevantes, evalúa impacto (low/medium/high)
+3. **Coder** — ejecuta cada subtarea con tools limitadas a escritura de código
+4. **Reviewer** — verifica que los cambios cumplen los criterios de aceptación
+5. **Validator** — ejecuta ruff lint + syntax check sobre archivos modificados
+
+Todo el progreso se reporta en tiempo real por Telegram.
+
+---
 
 ## Cambiar de proveedor LLM
-
-Editar `.env`:
 
 ```env
 # DeepSeek (más económico)
@@ -230,7 +244,6 @@ LLM_MODEL=gpt-4o
 OPENAI_API_KEY=sk-...
 ```
 
-Reiniciar el servicio:
 ```bash
 systemctl restart agent-serve
 ```
@@ -241,9 +254,7 @@ systemctl restart agent-serve
 # Ver logs en tiempo real
 journalctl -u agent-serve -f
 
-# Reiniciar
+# Reiniciar / detener
 systemctl restart agent-serve
-
-# Detener
 systemctl stop agent-serve
 ```
