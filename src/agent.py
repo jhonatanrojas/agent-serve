@@ -11,6 +11,7 @@ from src.executor import (
     execute_tool_call, _safe_parse_args,
     cancel, reset, is_cancelled, MAX_ITERATIONS
 )
+
 MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-chat")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -109,69 +110,23 @@ def run_agent_loop(messages: list, ctx: TaskContext, guard: LoopGuard,
 
 
 def run_agent(user_message: str, progress_callback=None) -> str:
-    # Import aquí para evitar circular en tiempo de módulo
-    from src.coder import run_coder
+    from src.supervisor import run_supervisor
 
     reset()
-    ctx = TaskContext(message=user_message)
-    guard = LoopGuard()
     log.info("Iniciando agente: %s", user_message[:100])
 
-    # Planner
-    is_complex, spec_summary = plan_task(user_message)
-    if is_complex and spec_summary:
-        if progress_callback:
-            progress_callback(spec_summary)
+    # Intentar flujo complejo via supervisor
+    result = run_supervisor(user_message, progress_callback)
 
-    # Analyst
-    analysis = ""
-    if is_complex:
-        analysis = analyze_codebase(user_message)
-        if progress_callback:
-            progress_callback(analysis)
-
-    # Coder: delegar subtareas si la spec las define
-    if is_complex:
-        from src.coder import run_coder
-        from src.reviewer import run_reviewer, format_review
-        spec = generate_spec(user_message)
-        subtasks = spec.get("subtasks", [])
-        criteria = spec.get("acceptance_criteria", [])
-        if subtasks:
-            context = f"Spec:\n{spec_summary}\n\nAnálisis:\n{analysis}"
-            all_modified = []
-            for i, subtask in enumerate(subtasks, 1):
-                if is_cancelled():
-                    break
-                if progress_callback:
-                    progress_callback(f"🔨 Subtarea {i}/{len(subtasks)}: {subtask}")
-                result = run_coder(subtask, context=context, progress_callback=progress_callback)
-                all_modified.extend(result.get("modified_files", []))
-                if progress_callback:
-                    progress_callback(f"✅ Subtarea {i} lista. Archivos: {result.get('modified_files', [])}")
-
-            # Reviewer: verificar que los cambios cumplen la spec
-            if progress_callback:
-                progress_callback("🔍 Revisando cambios...")
-            review = run_reviewer(spec_summary, list(set(all_modified)), criteria)
-            review_msg = format_review(review)
-            if progress_callback:
-                progress_callback(review_msg)
-
-            return (
-                f"✅ Tarea compleja completada.\n"
-                f"Archivos modificados: {list(set(all_modified))}\n\n"
-                f"{review_msg}"
-            )
+    # Si el supervisor indica que es tarea simple, usar loop directo
+    if result != "__SIMPLE__":
+        return result
 
     # Tarea simple: loop directo
+    ctx = TaskContext(message=user_message)
+    guard = LoopGuard()
     memories = load_memory(user_message)
     system = build_system_prompt(memories)
-    if is_complex:
-        if spec_summary:
-            system += f"\n\nSpec:\n{spec_summary}"
-        if analysis:
-            system += f"\n\nAnálisis:\n{analysis}"
 
     messages = [
         {"role": "system", "content": system},
