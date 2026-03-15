@@ -14,7 +14,7 @@ Construir un agente en segundo plano que:
 
 - [x] Configurar SSH a GitHub
 - [x] Crear estructura del proyecto
-- [ ] Configurar entorno Python (venv + dependencias)
+- [x] Configurar entorno Python (venv + dependencias)
 - [ ] Crear bot de Telegram y obtener token
 - [ ] Implementar agente con LiteLLM (soporte multi-proveedor)
 - [ ] Implementar tools: git_pull, git_push, create_spec
