@@ -6,6 +6,7 @@ import litellm
 from src.tools import TOOLS, TOOL_MAP
 from src.memory import search_memory
 from src.loop_guard import LoopGuard
+from src.task_context import TaskContext
 
 MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-chat")
 MAX_ITERATIONS = int(os.getenv("AGENT_MAX_ITERATIONS", "20"))
@@ -83,6 +84,7 @@ def _execute_tool(tc) -> str:
 def run_agent(user_message: str, progress_callback=None) -> str:
     reset()
     guard = LoopGuard()
+    ctx = TaskContext(message=user_message)
     log.info("Iniciando agente. Mensaje: %s", user_message[:100])
 
     memories = search_memory(user_message)
@@ -96,9 +98,12 @@ def run_agent(user_message: str, progress_callback=None) -> str:
     ]
 
     for iteration in range(MAX_ITERATIONS):
+        ctx.iterations = iteration + 1
+
         if is_cancelled():
             log.info("Agente cancelado en iteración %d", iteration)
-            return "⛔ Tarea cancelada por el usuario."
+            ctx.finish("cancelled")
+            return "⛔ Tarea cancelada por el usuario.\n\n" + ctx.summary()
 
         log.info("Iteración %d/%d", iteration + 1, MAX_ITERATIONS)
 
@@ -111,6 +116,7 @@ def run_agent(user_message: str, progress_callback=None) -> str:
             )
         except Exception as e:
             log.error("Error llamando al LLM: %s", e)
+            ctx.finish("error", str(e))
             return f"Error al llamar al modelo: {e}"
 
         msg = response.choices[0].message
@@ -118,12 +124,14 @@ def run_agent(user_message: str, progress_callback=None) -> str:
 
         if not msg.tool_calls:
             log.info("Agente completó en iteración %d", iteration + 1)
+            ctx.finish("completed")
             return msg.content
 
         for tc in msg.tool_calls:
             if is_cancelled():
                 log.info("Agente cancelado durante tool calls")
-                return "⛔ Tarea cancelada por el usuario."
+                ctx.finish("cancelled")
+                return "⛔ Tarea cancelada por el usuario.\n\n" + ctx.summary()
 
             name = tc.function.name
             try:
@@ -132,26 +140,27 @@ def run_agent(user_message: str, progress_callback=None) -> str:
                 log.error("JSON inválido en tool %s: %s", name, e)
                 args = {}
 
-            # Guardrail: detectar repetición de call
             loop_error = guard.record_call(name, args)
             if loop_error:
                 log.warning("Loop detectado en tool %s", name)
+                ctx.finish("loop_detected", loop_error)
                 if progress_callback:
                     progress_callback(loop_error)
-                return loop_error
+                return loop_error + "\n\n" + ctx.summary()
 
             if progress_callback:
                 progress_callback(f"⚙️ Ejecutando: `{name}`")
 
             result = _execute_tool(tc)
+            ctx.record_tool(name, args, result, iteration + 1)
 
-            # Guardrail: detectar resultado repetido
             loop_error = guard.record_result(name, result)
             if loop_error:
                 log.warning("Resultado repetido en tool %s", name)
+                ctx.finish("loop_detected", loop_error)
                 if progress_callback:
                     progress_callback(loop_error)
-                return loop_error
+                return loop_error + "\n\n" + ctx.summary()
 
             if progress_callback:
                 progress_callback(f"✅ `{name}`: {result[:200]}")
@@ -163,4 +172,5 @@ def run_agent(user_message: str, progress_callback=None) -> str:
             })
 
     log.warning("Límite de iteraciones alcanzado (%d)", MAX_ITERATIONS)
-    return f"⚠️ Se alcanzó el límite de {MAX_ITERATIONS} iteraciones. La tarea puede estar incompleta."
+    ctx.finish("limit_reached")
+    return f"⚠️ Se alcanzó el límite de {MAX_ITERATIONS} iteraciones.\n\n" + ctx.summary()
