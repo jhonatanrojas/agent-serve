@@ -5,11 +5,10 @@ from src.tools import TOOLS
 from src.memory import search_memory
 from src.loop_guard import LoopGuard
 from src.task_context import TaskContext
-from src.planner import plan_task, generate_spec
-from src.analyst import analyze_codebase
+from src.analyst import analyze_codebase  # noqa: F401 - usado via supervisor
 from src.executor import (
     execute_tool_call, _safe_parse_args,
-    cancel, reset, is_cancelled, MAX_ITERATIONS
+    cancel, reset, is_cancelled, MAX_ITERATIONS  # noqa: F401
 )
 
 MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-chat")

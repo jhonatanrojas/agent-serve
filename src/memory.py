@@ -1,7 +1,4 @@
-import os
-import json
 import sqlite3
-from pathlib import Path
 
 # Memoria simple basada en SQLite — sin dependencias de embeddings
 DB_PATH = "/root/agent-serve/.agent.db"

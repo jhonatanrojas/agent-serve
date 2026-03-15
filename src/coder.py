@@ -1,11 +1,10 @@
 import os
-import json
 import logging
 import litellm
 from src.loop_guard import LoopGuard
 from src.task_context import TaskContext
 from src.executor import execute_tool_call, _safe_parse_args, is_cancelled, MAX_ITERATIONS
-from src.tools import TOOLS, TOOL_MAP
+from src.tools import TOOLS
 
 MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-chat")
 log = logging.getLogger("coder")
@@ -121,7 +120,7 @@ def run_coder(subtask: str, context: str = "", progress_callback=None) -> dict:
 
     ctx.finish("limit_reached")
     return {
-        "result": f"⚠️ Límite de iteraciones alcanzado.",
+        "result": "⚠️ Límite de iteraciones alcanzado.",
         "modified_files": ctx.modified_files,
         "status": "limit_reached",
     }

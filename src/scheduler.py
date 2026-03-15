@@ -1,7 +1,5 @@
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-import json
-import os
 
 _scheduler = BackgroundScheduler()
 _scheduler.start()

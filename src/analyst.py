@@ -128,7 +128,7 @@ def analyze_codebase(message: str) -> str:
     emoji = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(level, "⚪")
 
     lines = [
-        f"🔍 **Análisis de codebase**",
+        "🔍 **Análisis de codebase**",
         f"• Archivos escaneados: {len(file_map)}",
         f"• Archivos relevantes: {', '.join(relevant) or 'ninguno'}",
         f"• Impacto: {emoji} {level}",

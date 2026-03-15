@@ -43,7 +43,7 @@ class TaskContext:
 
     def summary(self) -> str:
         lines = [
-            f"📋 **Resumen de tarea**",
+            "📋 **Resumen de tarea**",
             f"• Status: `{self.status}`",
             f"• Iteraciones: {self.iterations}",
             f"• Tools ejecutadas: {len(self.tool_calls)}",

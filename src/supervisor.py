@@ -6,6 +6,7 @@ from src.planner import plan_task, generate_spec
 from src.analyst import analyze_codebase
 from src.coder import run_coder
 from src.reviewer import run_reviewer, format_review
+from src.validator import run_validation, format_validation
 from src.executor import is_cancelled
 
 log = logging.getLogger("supervisor")
@@ -122,13 +123,23 @@ def run_supervisor(user_message: str, progress_callback=None) -> str:
 
     state.stage = "done"
 
+    # ── Validación técnica ───────────────────────────────────────────────────
+    if state.modified_files:
+        notify("🔬 Ejecutando validación técnica...")
+        validation = run_validation(state.modified_files)
+        validation_msg = format_validation(validation)
+        notify(validation_msg)
+    else:
+        validation = {"passed": True}
+
     # ── Resumen final ────────────────────────────────────────────────────────
     verdict = state.review.get("verdict", "SIN REVIEW")
     lines = [
-        f"🏁 **Tarea completada**",
+        "🏁 **Tarea completada**",
         f"• Subtareas ejecutadas: {len(subtasks)}",
         f"• Archivos modificados: {state.modified_files or 'ninguno'}",
         f"• Review: {verdict}",
+        f"• Validación: {'✅ OK' if validation.get('passed') else '⚠️ Con errores'}",
     ]
     if state.errors:
         lines.append(f"• ⚠️ Errores: {'; '.join(state.errors)}")

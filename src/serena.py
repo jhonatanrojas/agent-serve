@@ -67,7 +67,7 @@ class SerenaMCP:
                     "params": {},
                 })
                 return result.get("result", {}).get("tools", [])
-            except Exception as e:
+            except Exception:
                 return []
 
 

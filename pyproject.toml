@@ -1,0 +1,9 @@
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501", "W291"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/tools.py" = ["E501"]
