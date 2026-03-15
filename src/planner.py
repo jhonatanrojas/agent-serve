@@ -22,7 +22,7 @@ _CLASSIFY_PROMPT = """Analiza la siguiente instrucción y determina si es SIMPLE
 SIMPLE: tarea de un solo paso, un archivo, o una acción directa (git pull, leer archivo, buscar algo).
 COMPLEJA: afecta múltiples archivos, cambia arquitectura, introduce nueva feature, requiere subtareas encadenadas.
 
-Responde SOLO con un JSON: {"complexity": "simple"} o {"complexity": "complex", "reason": "..."}
+Responde SOLO con un JSON: {{"complexity": "simple"}} o {{"complexity": "complex", "reason": "..."}}
 
 Instrucción: {message}"""
 
