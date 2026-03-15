@@ -9,6 +9,10 @@ Agente autónomo que recibe instrucciones via Telegram, ejecuta tareas de desarr
 - **GitPython** — git pull / git push automático
 - **Notion MCP** — integración con Notion via MCP
 - **Serena MCP** — coding semántico (find_symbol, replace_content, etc.)
+- **Memoria SQLite** — memoria persistente entre conversaciones (sin dependencias externas)
+- **DuckDuckGo Search** — búsqueda web sin API key ni registro
+- **APScheduler** — tareas programadas con cron desde Telegram
+- **SQLite DB** — base de datos local para el agente
 - **systemd** — servicio en segundo plano
 
 ---
@@ -169,8 +173,44 @@ crea una página en Notion con el resumen de los cambios
 | `create_spec` | Crea archivo `.md` en `specs/` |
 | `read_file` | Lee un archivo |
 | `write_file` | Escribe un archivo |
+| `add_memory` | Guarda una memoria persistente |
+| `search_memory` | Busca memorias relevantes |
+| `get_all_memories` | Lista todas las memorias |
+| `web_search` | Busca en internet con DuckDuckGo |
+| `sql_query` | Ejecuta SQL en la DB local |
+| `list_tables` | Lista tablas de la DB |
+| `schedule_task` | Programa tarea con cron |
+| `list_tasks` | Lista tareas programadas |
+| `remove_task` | Elimina tarea programada |
 | Notion (22) | CRUD páginas, bases de datos, bloques |
 | Serena (27) | Búsqueda y edición semántica de código |
+
+## Ejemplos de uso por componente
+
+**Memoria:**
+```
+recuerda que el repo principal es mi-proyecto
+¿qué recuerdas sobre el proyecto?
+```
+
+**Búsqueda web:**
+```
+busca en internet cómo implementar JWT en FastAPI
+```
+
+**Base de datos:**
+```
+crea una tabla de tareas con id, titulo y estado
+lista todas las tareas pendientes
+```
+
+**Crons:**
+```
+programa una tarea "daily-pull" para hacer git pull todos los días a las 8am
+lista las tareas programadas
+elimina la tarea "daily-pull"
+```
+Formato cron: `"minuto hora día mes día_semana"` — ej: `"0 8 * * *"` = todos los días a las 8am
 
 ## Cambiar de proveedor LLM
 
