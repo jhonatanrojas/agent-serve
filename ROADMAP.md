@@ -18,8 +18,8 @@ Construir un agente en segundo plano que:
 - [x] Crear bot de Telegram y obtener token
 - [x] Implementar agente con LiteLLM (soporte multi-proveedor)
 - [x] Implementar tools: git_pull, git_push, create_spec
-- [ ] Integrar Notion MCP server
-- [ ] Conectar bot Telegram con el agente
-- [ ] Envío de avances/progreso por Telegram
-- [ ] Ejecutar agente como servicio en segundo plano (systemd)
+- [x] Integrar Notion MCP server
+- [x] Conectar bot Telegram con el agente
+- [x] Envío de avances/progreso por Telegram
+- [x] Ejecutar agente como servicio en segundo plano (systemd)
 - [ ] Pruebas end-to-end

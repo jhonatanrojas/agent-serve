@@ -1,6 +1,7 @@
 import os
 import git
 from pathlib import Path
+from src.notion import notion_mcp
 
 REPO_PATH = os.getenv("REPO_PATH", "/root/agent-serve")
 
@@ -120,10 +121,25 @@ TOOLS = [
     },
 ]
 
+def notion_tool(tool_name: str, arguments: dict) -> str:
+    return notion_mcp.call_tool(tool_name, arguments)
+
+
+# Cargar tools de Notion dinámicamente
+_notion_tools = []
+try:
+    _notion_tools = notion_mcp.list_tools()
+except Exception:
+    pass
+
+TOOLS = TOOLS + _notion_tools
+
 TOOL_MAP = {
     "git_pull": lambda args: git_pull(),
     "git_push": lambda args: git_push(args["message"]),
     "create_spec": lambda args: create_spec(args["title"], args["content"]),
     "read_file": lambda args: read_file(args["path"]),
     "write_file": lambda args: write_file(args["path"], args["content"]),
+    **{t["function"]["name"]: lambda args, n=t["function"]["name"]: notion_tool(n, args)
+       for t in _notion_tools},
 }
