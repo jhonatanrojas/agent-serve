@@ -16,12 +16,33 @@ class LoopGuard:
     last_progress_step: int = 0
     step: int = 0
 
+
+    def _normalize_result(self, result: str) -> str:
+        """Normaliza resultados para detectar loops incluso con campos variables (ej. request_id)."""
+        raw = (result or "").strip()
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                # Errores API: ignorar campos ruidosos que cambian en cada intento
+                if data.get("object") == "error" or "code" in data:
+                    stable = {
+                        "status": data.get("status"),
+                        "object": data.get("object"),
+                        "code": data.get("code"),
+                        "message": data.get("message", "")[:180],
+                    }
+                    return json.dumps(stable, sort_keys=True, ensure_ascii=False)
+        except Exception:
+            pass
+        return raw
+
     def _hash_call(self, tool_name: str, args: dict) -> str:
         key = json.dumps({"tool": tool_name, "args": args}, sort_keys=True)
         return hashlib.md5(key.encode()).hexdigest()
 
     def _hash_result(self, result: str) -> str:
-        return hashlib.md5(result.strip().encode()).hexdigest()
+        normalized = self._normalize_result(result)
+        return hashlib.md5(normalized.encode()).hexdigest()
 
     def record_call(self, tool_name: str, args: dict) -> Optional[str]:
         """Registra una tool call. Retorna mensaje de loop si se detecta, None si OK."""
