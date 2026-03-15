@@ -15,9 +15,25 @@ _bot_app = None
 _current_task = None
 
 
+async def _watch_current_task(update: Update, task: asyncio.Future):
+    """Espera una tarea en background y reporta resultado sin bloquear updates."""
+    global _current_task
+    try:
+        result = await task
+        await update.message.reply_text(result)
+    except asyncio.CancelledError:
+        await update.message.reply_text("⛔ Tarea cancelada.")
+    finally:
+        _current_task = None
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global _current_task
     if update.effective_user.id != ALLOWED_USER:
+        return
+
+    if _current_task and not _current_task.done():
+        await update.message.reply_text("⏳ Ya hay una tarea en ejecución. Usa /stop para cancelarla.")
         return
 
     user_text = update.message.text
@@ -32,19 +48,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return run_agent(user_text, lambda m: asyncio.run_coroutine_threadsafe(progress(m), loop))
 
     _current_task = loop.run_in_executor(None, run_sync)
-    try:
-        result = await _current_task
-        await update.message.reply_text(result)
-    except asyncio.CancelledError:
-        await update.message.reply_text("⛔ Tarea cancelada.")
-    finally:
-        _current_task = None
+    context.application.create_task(_watch_current_task(update, _current_task))
 
 
 async def handle_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global _current_task
     if update.effective_user.id != ALLOWED_USER:
         return
+
     cancel_agent()
+    if _current_task and not _current_task.done():
+        _current_task.cancel()
     await update.message.reply_text("⛔ Señal de cancelación enviada al agente.")
 
 
