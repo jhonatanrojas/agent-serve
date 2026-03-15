@@ -7,6 +7,7 @@ from src.tools import TOOLS, TOOL_MAP
 from src.memory import search_memory
 from src.loop_guard import LoopGuard
 from src.task_context import TaskContext
+from src.planner import plan_task
 
 MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-chat")
 MAX_ITERATIONS = int(os.getenv("AGENT_MAX_ITERATIONS", "20"))
@@ -178,8 +179,19 @@ def run_agent(user_message: str, progress_callback=None) -> str:
     guard = LoopGuard()
     log.info("Iniciando agente: %s", user_message[:100])
 
+    # Planner: evaluar complejidad y generar spec si aplica
+    is_complex, spec_summary = plan_task(user_message)
+    if is_complex and spec_summary:
+        log.info("Tarea compleja — spec generada")
+        if progress_callback:
+            progress_callback(spec_summary)
+
     memories = load_memory(user_message)
     system = build_system_prompt(memories)
+
+    # Inyectar spec en el contexto si existe
+    if is_complex and spec_summary:
+        system += f"\n\nSe ha generado una spec para esta tarea:\n{spec_summary}\nSigue las subtareas en orden."
 
     messages = [
         {"role": "system", "content": system},
