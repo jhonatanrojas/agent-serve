@@ -2,6 +2,7 @@ import os
 import logging
 from pathlib import Path
 import litellm
+from src.repomap import get_or_build_repo_map
 
 MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-chat")
 REPO_PATH = Path(os.getenv("REPO_PATH", "/root/agent-serve"))
@@ -66,8 +67,18 @@ Responde SOLO con JSON:
 }}"""
 
 
-def find_relevant_files(message: str, file_map: dict) -> list[str]:
-    """Usa el LLM para identificar archivos relevantes para la tarea."""
+def find_relevant_files(message: str, file_map: dict, repo_map: dict | None = None) -> list[str]:
+    """Usa RepoMap + LLM para identificar archivos relevantes para la tarea."""
+    msg_lower = message.lower()
+    if repo_map:
+        candidates = []
+        for module in repo_map.get("modules", [])[:500]:
+            mod_l = module.lower()
+            if any(tok in mod_l for tok in msg_lower.split()[:8]):
+                candidates.append(module)
+        if candidates:
+            return sorted(set(candidates))[:8]
+
     file_list = "\n".join(f"- {f} ({v['lines']} líneas)" for f, v in file_map.items())
     try:
         response = litellm.completion(
@@ -116,12 +127,13 @@ def assess_impact(message: str, relevant_files: list[str]) -> dict:
 
 def analyze_codebase(message: str) -> str:
     """
-    Punto de entrada principal. Escanea el repo, identifica archivos relevantes
-    y evalúa el impacto. Retorna un resumen legible. NO modifica ningún archivo.
+    Punto de entrada principal. Usa RepoMap, identifica archivos relevantes
+    y evalúa impacto. Retorna un resumen legible. NO modifica archivos.
     """
     log.info("Analizando codebase para: %s", message[:80])
+    repo_map = get_or_build_repo_map(REPO_PATH)
     file_map = scan_repo()
-    relevant = find_relevant_files(message, file_map)
+    relevant = find_relevant_files(message, file_map, repo_map=repo_map)
     impact = assess_impact(message, relevant)
 
     level = impact.get("impact_level", "unknown")
@@ -129,6 +141,7 @@ def analyze_codebase(message: str) -> str:
 
     lines = [
         "🔍 **Análisis de codebase**",
+        f"• RepoMap módulos: {len(repo_map.get('modules', []))}",
         f"• Archivos escaneados: {len(file_map)}",
         f"• Archivos relevantes: {', '.join(relevant) or 'ninguno'}",
         f"• Impacto: {emoji} {level}",
