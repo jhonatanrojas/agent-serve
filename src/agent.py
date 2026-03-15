@@ -8,6 +8,7 @@ from src.memory import search_memory
 from src.loop_guard import LoopGuard
 from src.task_context import TaskContext
 from src.planner import plan_task
+from src.analyst import analyze_codebase
 
 MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-chat")
 MAX_ITERATIONS = int(os.getenv("AGENT_MAX_ITERATIONS", "20"))
@@ -186,12 +187,23 @@ def run_agent(user_message: str, progress_callback=None) -> str:
         if progress_callback:
             progress_callback(spec_summary)
 
+    # Analyst: analizar codebase si la tarea es compleja
+    analysis = ""
+    if is_complex:
+        analysis = analyze_codebase(user_message)
+        log.info("Análisis completado")
+        if progress_callback:
+            progress_callback(analysis)
+
     memories = load_memory(user_message)
     system = build_system_prompt(memories)
 
-    # Inyectar spec en el contexto si existe
-    if is_complex and spec_summary:
-        system += f"\n\nSe ha generado una spec para esta tarea:\n{spec_summary}\nSigue las subtareas en orden."
+    # Inyectar spec y análisis en el contexto si existen
+    if is_complex:
+        if spec_summary:
+            system += f"\n\nSpec generada:\n{spec_summary}\nSigue las subtareas en orden."
+        if analysis:
+            system += f"\n\nAnálisis del codebase:\n{analysis}"
 
     messages = [
         {"role": "system", "content": system},
