@@ -72,6 +72,8 @@ def run_coder(subtask: str, context: str = "", progress_callback=None,
                 repo_path=repo_path,
             )
             msg = llm_result.message
+            if progress_callback and iteration == 0:
+                progress_callback(f"🤖 [coder/{llm_result.model_used}] ejecutando...")
         except Exception as e:
             log.error("Error LLM coder: %s", e)
             ctx.finish("error", str(e))

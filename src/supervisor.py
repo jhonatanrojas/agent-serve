@@ -72,6 +72,12 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
         if progress_callback:
             progress_callback(msg)
 
+    def notify_agent(agent: str, msg: str):
+        from src.llm_selector import select_candidates
+        candidates = select_candidates(agent_role=agent, mode=mode, manual_model_key=manual_model_key)
+        model_label = candidates[0].key if candidates else "?"
+        notify(f"🤖 [{agent}/{model_label}] {msg}")
+
     run_id = existing_run_id or create_run_state(initial_phase="planning", source_message=user_message)
 
     try:
@@ -88,7 +94,7 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
         if not state.record_agent_call("planner"):
             return "🔁 Loop detectado en planner. Abortando."
 
-        notify("📐 Planificando tarea...")
+        notify_agent("planner", "Planificando tarea...")
         is_complex, spec_summary = plan_task(user_message, mode=mode, manual_model_key=manual_model_key)
         if not is_complex:
             return "__SIMPLE__"
@@ -122,7 +128,7 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
             append_event(run_id, "guardrail_triggered", "analyzing", {"agent": "analyst", "reason": "loop"})
             state.stage = "coding"
         else:
-            notify("🔍 Analizando codebase...")
+            notify_agent("analyst", "Analizando codebase...")
             state.analysis = analyze_codebase(user_message)
             state.stage = "coding"
             update_run_state(run_id, phase="coding", next_action="code_subtask_1")
@@ -161,7 +167,7 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
             strategy_used = "default"
             while True:
                 attempt_count += 1
-                notify(f"🔨 Subtarea {i}/{len(subtasks)} intento {attempt_count}: {subtask}")
+                notify_agent("coder", f"Subtarea {i}/{len(subtasks)} intento {attempt_count}:\n`{subtask}`")
                 update_run_state(run_id, current_subtask=subtask, current_subtask_index=i, next_action=f"code_subtask_{i}")
                 append_checkpoint(run_id, "subtask_started", "coding", {"subtask": subtask, "index": i, "total": len(subtasks), "attempt": attempt_count})
 
@@ -217,7 +223,7 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
             return "⛔ Cancelado antes del review."
 
         if state.record_agent_call("reviewer"):
-            notify("🔍 Revisando cambios...")
+            notify_agent("reviewer", "Revisando cambios...")
             criteria = state.spec.get("acceptance_criteria", [])
             state.review = run_reviewer(state.spec_summary, state.modified_files, criteria,
                                         mode=mode, manual_model_key=manual_model_key)
@@ -232,7 +238,7 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
     if state.modified_files and next_action in (
         "planning", "analyze", "review", "validate"
     ) or next_action.startswith("code_subtask_"):
-        notify("🔬 Ejecutando validación técnica...")
+        notify("🔬 [validator] Ejecutando validación técnica...")
         validation = run_validation(state.modified_files)
         append_validation(run_id, validation)
         mark_validation_result(bool(validation.get("passed")), workspace.get("branch_name", ""))
