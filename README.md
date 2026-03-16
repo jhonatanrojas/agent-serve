@@ -6,7 +6,7 @@ Agente autónomo operado por Telegram para tareas de ingeniería de software con
 
 - Runtime persistente con `run_id`, eventos, checkpoints, validaciones e intentos.
 - Reanudación de corridas con `resume_run(run_id)`.
-- Workspace por tarea (branch aislada) + gate de git por branch.
+- Workspace dinámico por sesión/chat (`/workon`) con repositorio activo + branch por tarea.
 - RepoMap persistente para acelerar análisis contextual.
 - RecoveryAgent para retry/pause por subtarea.
 - Reviewer con contexto de diff + `required_fixes`.
@@ -141,6 +141,10 @@ systemctl start agent-serve
 
 | Comando | Acción |
 |---|---|
+| `/workon repo=<url> notion=<id> branch=<branch>` | Configura workspace activo por chat (clona/actualiza repo y selecciona branch base) |
+| `/plan_tasks` | Lista tareas elegibles de Notion para el repo activo |
+| `/do_task <task_id>` | Ejecuta una tarea concreta en branch `task/<id>` y actualiza Notion inicio/fin |
+| `/do_next` | Toma la siguiente tarea elegible del repo activo |
 | `/stop` | Cancela la tarea en curso |
 | `/status [run_id]` | Dashboard textual del run activo/último |
 | `/plan [run_id]` | Vista de plan/subtareas del run |
@@ -254,3 +258,30 @@ journalctl -u agent-serve -f
 - Si Telegram “muestra imagen”, normalmente es preview de URL en texto. El bot ya desactiva previews en respuestas.
 - Si el proveedor LLM falla (403/timeout), revisa keys/model/provider en `.env`.
 - Riesgos y backlog técnico: `docs/RISK_TASKS.md`.
+
+
+## Modo workspace dinámico (nuevo)
+
+El agente ahora puede trabajar contra **múltiples repositorios** en distintas sesiones Telegram:
+
+1. Ejecuta `/workon repo=<url> notion=<database_id> branch=<branch_base>`
+2. El sistema guarda el workspace activo por `chat_id` en SQLite (`workspace_sessions`).
+3. `/plan_tasks` consulta Notion y filtra tareas por repositorio activo.
+4. `/do_task <task_id>`:
+   - crea/cambia a branch `task/<task_id>` (nunca `main/master`),
+   - marca Notion como `In progress`,
+   - ejecuta la tarea,
+   - al finalizar marca `Done` o `Blocked`,
+   - se detiene y pregunta si debe continuar con la siguiente.
+5. `/do_next` ejecuta automáticamente la siguiente tarea elegible.
+
+### Compatibilidad legacy
+
+Si no configuras `/workon`, se mantiene el comportamiento anterior con `REPO_PATH` como fallback.
+
+### Política de seguridad
+
+- Nunca se trabaja directo en `main/master`.
+- Cada tarea usa su branch `task/*`.
+- No se encadenan tareas automáticamente sin confirmación posterior.
+- Todas las operaciones de tools y edición semántica (Serena MCP) usan el `repo_path` del workspace activo.

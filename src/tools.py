@@ -10,11 +10,11 @@ from src.scheduler import schedule_task, list_tasks, remove_task
 from src.git_gate import can_commit, can_push, approve_push, clear_push_approval
 from src.path_sandbox import resolve_repo_path, PathSandboxError
 
-REPO_PATH = os.getenv("REPO_PATH", "/root/agent-serve")
+from src.workspace_context import get_active_repo_path
 
 
 def _repo() -> git.Repo:
-    return git.Repo(REPO_PATH)
+    return git.Repo(str(get_active_repo_path()))
 
 
 def git_pull() -> str:
@@ -116,7 +116,7 @@ def git_push(message: str) -> str:
 
 def create_spec(title: str, content: str) -> str:
     try:
-        specs_dir = Path(REPO_PATH) / "specs"
+        specs_dir = get_active_repo_path() / "specs"
         specs_dir.mkdir(exist_ok=True)
         filename = title.lower().replace(" ", "-") + ".md"
         filepath = specs_dir / filename
