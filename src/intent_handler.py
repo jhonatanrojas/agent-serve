@@ -78,10 +78,18 @@ async def handle_natural_message(
             repo_name = repo_name_from_url(repo_url)
             branch = intent.get("branch") or "main"
             await notify(f"🔧 Configurando workspace: `{repo_name}` (branch: `{branch}`)...")
-            ws = WorkspaceManager().set_active_workspace(chat_id, repo_url, "", branch)
+
+            import asyncio
+            loop = asyncio.get_event_loop()
+
+            def _setup():
+                return WorkspaceManager().set_active_workspace(chat_id, repo_url, "", branch)
+
+            ws = await loop.run_in_executor(None, _setup)
             set_active_repo_path(ws["repo_path"])
             await notify(f"✅ Workspace listo: `{repo_name}` en `{ws['active_branch']}`")
         except Exception as e:
+            log.exception(f"[intent_handler] error setup repo: {e}")
             await notify(f"❌ No pude configurar el repo: {e}")
             return True
     else:
