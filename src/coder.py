@@ -121,6 +121,21 @@ def run_coder(subtask: str, context: str = "", progress_callback=None,
             llm_calls += 1
             if progress_callback and iteration == 0:
                 progress_callback(f"🤖 [coder/{llm_result.model_used}] ejecutando...")
+
+            # Extraer y mostrar la reflexión del modelo si existe
+            content_str = getattr(msg, "content", "") or ""
+            reasoning = getattr(msg, "reasoning_content", None)
+            
+            import re
+            if not reasoning and "<think>" in content_str:
+                match = re.search(r"<think>(.*?)</think>", content_str, re.DOTALL)
+                if match:
+                    reasoning = match.group(1).strip()
+            
+            if reasoning and progress_callback:
+                display_reasoning = reasoning[:800] + "\n...(truncado)" if len(reasoning) > 800 else reasoning
+                progress_callback(f"🧠 [Reflexión {llm_result.model_used}]:\n{display_reasoning}")
+
         except Exception as e:
             log.error("Error LLM coder: %s", e)
             ctx.finish("error", str(e))

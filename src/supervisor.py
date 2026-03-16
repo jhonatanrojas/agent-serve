@@ -136,10 +136,22 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
         state.spec_summary = spec_summary
         spec, _ = generate_spec(user_message, mode=mode, manual_model_key=manual_model_key)
         state.spec = spec
+        
+        subtasks_list = state.spec.get("subtasks", [])
+        if subtasks_list:
+            plan_log = [f"📋 Plan de ejecución ({len(subtasks_list)} subtareas):"]
+            for i, st in enumerate(subtasks_list):
+                desc = st.get('description', 'Sin descripción')
+                # Truncar descripción si es muy larga
+                desc = desc[:100] + "..." if len(desc) > 100 else desc
+                type_badge = "🔍" if st.get("type") == "analysis" else "💻"
+                plan_log.append(f"  {i+1}. {type_badge} {desc}")
+            notify("\n".join(plan_log))
+            
         state.stage = "analyzing"
         update_run_state(run_id, phase="analyzing", next_action="analyze", spec=state.spec)
         append_checkpoint(run_id, "phase_analyzing", "analyzing", {"spec_summary": spec_summary[:300]})
-        notify(spec_summary)
+        notify(f"📝 Resumen de Especificación:\n{spec_summary}")
     else:
         if not state.spec:
             _, state.spec_summary, _ = plan_task(user_message, mode=mode, manual_model_key=manual_model_key)
