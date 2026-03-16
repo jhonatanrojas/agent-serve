@@ -214,11 +214,8 @@ def write_file(path: str, content: str) -> str:
 # Tool definitions para LiteLLM
 def codex_exec(prompt: str, writable_paths: list[str] | None = None) -> str:
     """Ejecuta una tarea de código con Codex CLI usando la sesión activa (~/.codex/auth.json)."""
-    import subprocess
+    import subprocess, os, signal
     repo_path = str(get_active_repo_path())
-    # Permisos: lectura total del disco + escritura en el repo
-    write_targets = writable_paths or [repo_path]
-    write_perms = ",".join(f'"{p}"' for p in write_targets)
     cmd = [
         "codex", "exec",
         "-c", "sandbox_permissions=[\"disk-full-read-access\"]",
@@ -226,17 +223,19 @@ def codex_exec(prompt: str, writable_paths: list[str] | None = None) -> str:
         prompt,
     ]
     try:
-        result = subprocess.run(
-            cmd,
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            timeout=120,
+        proc = subprocess.Popen(
+            cmd, cwd=repo_path,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True,  # nuevo grupo de procesos
         )
-        output = (result.stdout or "") + (result.stderr or "")
+        try:
+            stdout, stderr = proc.communicate(timeout=90)
+        except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            proc.wait()
+            return "codex exec: timeout (90s)"
+        output = (stdout or "") + (stderr or "")
         return output[:2000] if output else "codex exec: sin output"
-    except subprocess.TimeoutExpired:
-        return "codex exec: timeout (120s)"
     except Exception as e:
         return f"codex exec error: {e}"
 
