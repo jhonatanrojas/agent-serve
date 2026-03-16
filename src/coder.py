@@ -45,7 +45,46 @@ Reglas estrictas:
 - Responde en español."""
 
 
-def _has_code_changes(repo_path: str | None) -> bool:
+def _reflect_on_errors(messages: list) -> str | None:
+    """Analiza los últimos tool results en busca de patrones de error recurrentes.
+    Devuelve un mensaje de corrección específico, o None si no hay nada que corregir.
+    """
+    # Recoger los últimos resultados de tools
+    recent_tool_results = [
+        m["content"] for m in messages[-8:]
+        if m.get("role") == "tool" and isinstance(m.get("content"), str)
+    ]
+    if not recent_tool_results:
+        return None
+
+    errors = [r for r in recent_tool_results if r.startswith("Error") or "inválido" in r or "faltantes" in r or "no permitida" in r or "no registrada" in r]
+    if not errors:
+        return None
+
+    last = errors[-1]
+
+    if "JSON inválido" in last or "argumentos JSON" in last:
+        return (
+            "⚠️ Auto-corrección: el JSON del tool call fue inválido. "
+            "Esto ocurre cuando el argumento `content` o `repl` es demasiado largo. "
+            "USA `write_file(path, content)` para escribir archivos completos. "
+            "NUNCA uses `replace_content` con más de 3 líneas de código."
+        )
+    if "faltantes" in last:
+        import re
+        missing = re.findall(r"\['(.+?)'\]", last)
+        return (
+            f"⚠️ Auto-corrección: faltan argumentos requeridos: {missing}. "
+            "Asegúrate de incluir TODOS los parámetros requeridos en el tool call."
+        )
+    if "no permitida" in last or "no registrada" in last:
+        return (
+            f"⚠️ Auto-corrección: {last}. "
+            f"Usa solo estas tools: read_file, write_file, find_file, list_dir, subtask_done."
+        )
+    return None
+
+
     if not repo_path:
         return bool(False)
     try:
@@ -106,6 +145,13 @@ def run_coder(subtask: str, context: str = "", progress_callback=None,
         if max_llm_calls is not None and llm_calls >= max_llm_calls:
             ctx.finish("error", f"Presupuesto LLM agotado ({llm_calls}/{max_llm_calls})")
             return {"result": "Presupuesto LLM agotado para esta corrida.", "modified_files": ctx.modified_files, "status": "error", "llm_calls": llm_calls, "tool_calls": tool_calls}
+
+        # Reflexión automática: detectar errores recurrentes e inyectar corrección
+        if iteration > 0:
+            reflection = _reflect_on_errors(messages)
+            if reflection:
+                messages.append({"role": "user", "content": reflection})
+                log.info("[coder] reflexión inyectada: %s", reflection[:100])
 
         try:
             llm_result = run_llm(
