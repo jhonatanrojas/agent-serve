@@ -164,6 +164,15 @@ def run_llm(
             response = litellm.completion(**kwargs)
             message = response.choices[0].message
 
+            # Detectar respuesta vacía (content=None y sin tool_calls) → fallback
+            if not getattr(message, "content", None) and not getattr(message, "tool_calls", None):
+                attempt["status"] = "failed"
+                attempt["error_type"] = "empty_response"
+                attempts.append(attempt)
+                _stats[entry.key]["failures"] += 1
+                log.warning(f"[llm_runner] EMPTY response model={entry.key}, fallback al siguiente")
+                continue
+
             attempt["status"] = "ok"
             attempts.append(attempt)
             _stats[entry.key]["success"] += 1
