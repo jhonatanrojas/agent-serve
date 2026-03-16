@@ -1,12 +1,13 @@
 # Agent Server
 
-Agente autónomo operado por Telegram para tareas de ingeniería de software con ejecución en fases, guardrails, persistencia de runs, recuperación y observabilidad.
+Agente autónomo operado por Telegram para tareas de ingeniería de software con ejecución en fases, guardrails, persistencia de runs, recuperación y observabilidad. Ahora soporta modo local-first de tareas sin depender de Notion.
 
 ## Qué hay nuevo (resumen rápido)
 
 - Runtime persistente con `run_id`, eventos, checkpoints, validaciones e intentos.
 - Reanudación de corridas con `resume_run(run_id)`.
 - Workspace dinámico por sesión/chat (`/workon`) con repositorio activo + branch por tarea.
+- Sistema de tareas local-first (`.agent_tasks`) con comandos Telegram de backlog.
 - RepoMap persistente para acelerar análisis contextual.
 - RecoveryAgent para retry/pause por subtarea.
 - Reviewer con contexto de diff + `required_fixes`.
@@ -142,9 +143,16 @@ systemctl start agent-serve
 | Comando | Acción |
 |---|---|
 | `/workon repo=<url> notion=<id> branch=<branch>` | Configura workspace activo por chat (clona/actualiza repo y selecciona branch base) |
-| `/plan_tasks` | Lista tareas elegibles de Notion para el repo activo |
-| `/do_task <task_id>` | Ejecuta una tarea concreta en branch `task/<id>` y actualiza Notion inicio/fin |
-| `/do_next` | Toma la siguiente tarea elegible del repo activo |
+| `/plan_tasks` | Lista tareas elegibles según `task_mode` (local/notion/hybrid) |
+| `/addtask <titulo | descripcion | deps>` | Crea una tarea local y su archivo `TASK-XXX.md` |
+| `/addtasks <t1 ; t2 ; ...>` | Crea varias tareas locales en lote |
+| `/do_task <task_id>` | Ejecuta una tarea concreta en branch `task/<id>` y actualiza estado en su fuente |
+| `/do_next` | Toma la siguiente tarea elegible del backlog local (o según modo) |
+| `/tasks` | Lista backlog local |
+| `/task <id>` | Muestra detalle de una tarea local |
+| `/taskmode [local\|notion\|hybrid]` | Consulta o cambia fuente de tareas |
+| `/sync_notion_to_tasks` | Importa tareas de Notion a backlog local (opcional) |
+| `/export_tasks` | Exporta ruta del `tasks.json` local |
 | `/stop` | Cancela la tarea en curso |
 | `/status [run_id]` | Dashboard textual del run activo/último |
 | `/plan [run_id]` | Vista de plan/subtareas del run |
@@ -155,6 +163,18 @@ systemctl start agent-serve
 > Si no pasas `run_id`, se usa el run activo o el más reciente.
 
 ---
+
+
+
+## Flujo local-first (sin Notion)
+
+1. Configura workspace: `/workon repo=<url> branch=<branch>` (notion opcional).
+2. Crea tareas: `/addtask` o `/addtasks`.
+3. Ejecuta secuencialmente: `/do_next`.
+4. Al terminar cada tarea el bot se detiene y pide confirmación para continuar.
+5. Consulta estado: `/tasks` y `/task TASK-XXX`.
+
+Formato oficial de archivos: `docs/LOCAL_TASKS.md`.
 
 ## Seguridad operacional
 
