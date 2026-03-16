@@ -23,8 +23,20 @@ def _repo() -> git.Repo:
 def git_pull() -> str:
     try:
         repo = _repo()
-        result = repo.remotes.origin.pull()
-        return f"git pull OK: {result[0].commit.hexsha[:7]}"
+        branch = repo.active_branch.name
+        # Si la branch tiene upstream, pull normal
+        tracking = repo.active_branch.tracking_branch()
+        if tracking:
+            result = repo.remotes.origin.pull()
+            return f"git pull OK: {result[0].commit.hexsha[:7]}"
+        # Sin upstream: fetch origin y merge desde default branch
+        repo.remotes.origin.fetch()
+        try:
+            default = repo.git.symbolic_ref("refs/remotes/origin/HEAD").split("/")[-1]
+        except Exception:
+            default = "main"
+        repo.git.merge(f"origin/{default}", "--no-edit")
+        return f"git pull OK (merged origin/{default} into {branch})"
     except Exception as e:
         return f"git pull error: {e}"
 

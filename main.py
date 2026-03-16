@@ -997,6 +997,16 @@ async def handle_codexkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     if result.returncode == 0:
         _os.environ["OPENAI_API_KEY"] = api_key
+        # Persistir en .env
+        from pathlib import Path
+        import re as _re
+        env_path = Path(__file__).parent / ".env"
+        text = env_path.read_text() if env_path.exists() else ""
+        if "OPENAI_API_KEY=" in text:
+            text = _re.sub(r"OPENAI_API_KEY=.*", f"OPENAI_API_KEY={api_key}", text)
+        else:
+            text += f"\nOPENAI_API_KEY={api_key}\n"
+        env_path.write_text(text)
         from src.llm_registry import load_dynamic_models
         load_dynamic_models()
         status = subprocess.run(["codex", "login", "status"], capture_output=True, text=True).stdout.strip()

@@ -57,13 +57,4 @@ def select_candidates(
             if not require_tools or m.supports_tools
         ]
 
-    # Si el rol es coder y hay sesión codex activa, ponerlo primero
-    if role == "coder" and mode == "auto":
-        import os
-        codex_session = os.path.exists(os.path.expanduser("~/.codex/auth.json"))
-        if codex_session:
-            codex = get_model("codex_mini")
-            if codex and codex.is_available:
-                candidates = [codex] + [c for c in candidates if c.key != "codex_mini"]
-
     return candidates  # ya ordenados por priority desde list_models
