@@ -71,6 +71,10 @@ Cuando el supervisor inicia una tarea compleja:
 | `src/shell_policy.py` | Policy central de tools (allowlist/timeout/output) |
 | `src/executor.py` | Ejecución de tools aplicando policy + guardrails |
 | `src/tools.py` | Registro de tools locales + MCP + git seguro |
+| `src/llm_registry.py` | Registro central de modelos LLM y sus capacidades |
+| `src/llm_selector.py` | Selección de candidatos por rol, task_type y modo |
+| `src/llm_runner.py` | Ejecución con fallback ordenado y métricas |
+| `src/chat_preferences.py` | Preferencia de modelo por chat_id (SQLite) |
 | `main.py` | Bot Telegram, comandos operativos y ejecución async |
 
 ---
@@ -98,9 +102,14 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 Crea `.env` (o adapta el existente):
 
 ```env
-# Modelo
+# Modelo principal (fallback legacy)
 LLM_MODEL=deepseek/deepseek-chat
 DEEPSEEK_API_KEY=...
+
+# Modelos adicionales (opcionales — activan el modelo en el registry)
+OPENAI_API_KEY=...
+GEMINI_API_KEY=...
+MISTRAL_API_KEY=...
 
 # Telegram
 TELEGRAM_TOKEN=...
@@ -119,7 +128,7 @@ AGENT_MAX_ITERATIONS=20
 AGENT_MAX_SAME_TOOL_CALLS=3
 AGENT_MAX_SAME_RESULT=2
 
-# Shell policy (nueva)
+# Shell policy
 AGENT_TOOL_TIMEOUT_SECONDS=45
 AGENT_TOOL_OUTPUT_LIMIT=2000
 AGENT_TOOL_ALLOWLIST=
@@ -147,8 +156,55 @@ systemctl start agent-serve
 | `/resume [run_id]` | Reanuda una corrida persistida |
 | `/logs [run_id]` | Eventos recientes del run |
 | `/diff` | Resumen del diff local actual |
+| `/models` | Lista modelos disponibles, estado y modo actual del chat |
+| `/model auto` | Vuelve al modo de selección automática |
+| `/model <model_key>` | Fija un modelo para el chat (persiste en SQLite) |
+| `/runwith <model_key> <tarea>` | Ejecuta una tarea puntual con un modelo específico |
+| `/modelstats` | Métricas de uso por modelo (calls, éxitos, fallos, fallbacks) |
 
 > Si no pasas `run_id`, se usa el run activo o el más reciente.
+
+---
+
+## LLM Routing
+
+El sistema soporta múltiples proveedores LLM con selección automática y control manual.
+
+### Modos de operación
+
+- **auto** (default): el sistema elige el mejor modelo según el rol del subagente y disponibilidad.
+- **manual**: el usuario fija un modelo desde Telegram con `/model <key>`; persiste por `chat_id`.
+
+### Modelos disponibles
+
+| Key | Modelo | Rol preferido | Requiere |
+|---|---|---|---|
+| `deepseek_main` | deepseek/deepseek-chat | general, coder, analyst | `DEEPSEEK_API_KEY` |
+| `deepseek_reasoner` | deepseek/deepseek-reasoner | planner, reviewer | `DEEPSEEK_API_KEY` |
+| `gpt_main` | openai/gpt-4o | coder, reviewer, planner | `OPENAI_API_KEY` |
+| `gemini_fast` | gemini/gemini-2.0-flash | analyst, general | `GEMINI_API_KEY` |
+| `mistral_code` | mistral/codestral-latest | coder, tests | `MISTRAL_API_KEY` |
+
+### Fallback automático
+
+Si un modelo falla (auth, rate limit, timeout), el runner intenta automáticamente el siguiente candidato por prioridad. Todo queda trazado en logs y en `/modelstats`.
+
+### Agregar un modelo nuevo
+
+Edita `src/llm_registry.py` y agrega una entrada en `MODELS_REGISTRY`:
+
+```python
+"mi_modelo": ModelEntry(
+    key="mi_modelo",
+    model="provider/model-name",
+    priority=6,
+    supports_tools=True,
+    use_cases=["coder", "general"],
+    enabled=bool(os.getenv("MI_API_KEY")),
+),
+```
+
+No se requiere cambiar ninguna otra capa.
 
 ---
 
