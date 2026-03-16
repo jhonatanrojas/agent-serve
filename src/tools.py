@@ -1,5 +1,8 @@
 import os
 import git
+import urllib.request
+import urllib.error
+import json as _json
 from pathlib import Path
 from src.notion import notion_mcp
 from src.serena import serena_mcp
@@ -112,6 +115,41 @@ def git_push(message: str) -> str:
     if not commit_result.startswith("git commit OK"):
         return commit_result
     return git_push_branch(None)
+
+
+def create_github_pr(title: str, body: str, head: str, base: str = "main") -> dict:
+    """Crea un PR en GitHub. Retorna {"url": ..., "number": ...} o {"error": ...}."""
+    token = os.getenv("GITHUB_TOKEN", "")
+    if not token:
+        return {"error": "GITHUB_TOKEN no configurado"}
+    try:
+        repo = _repo()
+        remote_url = repo.remotes.origin.url  # https://github.com/owner/repo.git
+        # Extraer owner/repo
+        parts = remote_url.rstrip("/").rstrip(".git").split("/")
+        owner, repo_name = parts[-2], parts[-1]
+        if owner.endswith(":"):  # git@github.com:owner/repo
+            owner = owner.split(":")[-1]
+
+        payload = _json.dumps({"title": title, "body": body, "head": head, "base": base}).encode()
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{owner}/{repo_name}/pulls",
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "Content-Type": "application/json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = _json.loads(resp.read())
+            return {"url": data["html_url"], "number": data["number"]}
+    except urllib.error.HTTPError as e:
+        return {"error": f"GitHub API {e.code}: {e.read().decode()[:200]}"}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 def create_spec(title: str, content: str) -> str:

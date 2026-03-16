@@ -108,6 +108,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async def run_task_by_id(task_id: str):
         from src.task_store import TaskStore
         from src.task_source_router import TaskSourceRouter
+        from src.tools import git_commit, git_push_branch, create_github_pr
+        from src.git_gate import approve_push
         ws_now = _set_workspace_context(chat_id)
         router = TaskSourceRouter(ws_now)
         tasks = router.list_tasks()
@@ -121,6 +123,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                   mode=pref["mode"], manual_model_key=pref["model_key"])
         result = await loop.run_in_executor(None, run_sync)
         await notify(result[:1000] if result else "✅ Tarea completada.")
+
+        # --- Push + PR al finalizar ---
+        def _push_and_pr():
+            import git as _git
+            repo = _git.Repo(str(ws_now["repo_path"]))
+            branch = repo.active_branch.name
+            # Commit si hay cambios
+            repo.git.add(A=True)
+            if repo.is_dirty(untracked_files=False) or repo.index.diff("HEAD"):
+                repo.index.commit(f"feat({task.id}): {task.title}")
+            # Push (aprobar + push)
+            approve_push(branch)
+            push_result = git_push_branch(branch)
+            if "error" in push_result.lower():
+                return push_result, None
+            # Crear PR
+            pr = create_github_pr(
+                title=f"[{task.id}] {task.title}",
+                body=f"## Resumen\n\n{result[:2000] if result else 'Tarea completada por el agente.'}\n\n---\n_PR generado automáticamente por agent-serve_",
+                head=branch,
+                base="main",
+            )
+            return push_result, pr
+
+        push_res, pr = await loop.run_in_executor(None, _push_and_pr)
+        if pr and "url" in pr:
+            await notify(f"🔀 PR creado: {pr['url']}")
+        elif pr and "error" in pr:
+            await notify(f"⚠️ Push OK pero PR falló: {pr['error']}")
 
     # --- Intentar flujo de lenguaje natural ---
     from src.intent_handler import handle_natural_message
