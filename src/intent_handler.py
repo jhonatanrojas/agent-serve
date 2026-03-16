@@ -127,11 +127,19 @@ async def handle_natural_message(
         # Pregunta sobre cambios/diff de una tarea específica
         if active_run and any(w in msg_lower for w in ("cambio", "modific", "hiciste", "realizaste", "diff", "archivo")):
             modified = active_run.get("modified_files", [])
-            lines.append(f"📝 **Archivos modificados en `{active_run.get('source_message','')[:50]}`**")
+            phase = active_run.get("phase", "")
+            subtask = active_run.get("current_subtask", "")
+            idx = active_run.get("current_subtask_index", 0)
+            total = len(active_run.get("spec", {}).get("subtasks", []))
+            lines.append(f"📝 **Cambios en `{active_run.get('source_message','')[:50]}`**")
+            if phase not in ("done", "reviewing"):
+                lines.append(f"⏳ Tarea en progreso ({idx}/{total} subtareas) — los archivos se registran al completar cada subtarea.")
+                if subtask:
+                    lines.append(f"• Ejecutando ahora: `{subtask[:80]}`")
             if modified:
+                lines.append("• Archivos modificados hasta ahora:")
                 for f in modified:
                     lines.append(f"  - `{f}`")
-                # Mostrar diff resumido si hay workspace
                 if ws_data:
                     try:
                         import git as _git
@@ -141,8 +149,8 @@ async def handle_natural_message(
                             lines.append(f"\n```\n{diff[:800]}\n```")
                     except Exception:
                         pass
-            else:
-                lines.append("  Sin archivos modificados aún.")
+            elif phase in ("done", "reviewing"):
+                lines.append("  Sin archivos modificados.")
             await notify("\n".join(lines))
             return True
 
