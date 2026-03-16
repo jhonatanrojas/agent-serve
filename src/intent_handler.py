@@ -108,7 +108,49 @@ async def handle_natural_message(
         return False  # delegar a run_agent normal
 
     if kind == "query":
-        return False  # delegar a run_agent normal
+        # Responder con estado real del backlog y run activo, sin crear workspace
+        try:
+            ws_data = WorkspaceManager().get_active_workspace(chat_id)
+        except Exception:
+            ws_data = None
+
+        lines = []
+
+        # Estado del run activo
+        from src.run_state import get_run_state, list_recent_runs
+        runs = list_recent_runs(limit=1)
+        if runs:
+            run = get_run_state(runs[0]["run_id"])
+            if run and run.get("phase") not in ("done", None):
+                lines.append(f"⚙️ **Tarea en ejecución**")
+                lines.append(f"• Fase: `{run.get('phase')}`")
+                if run.get("current_subtask"):
+                    lines.append(f"• Subtarea actual: `{run.get('current_subtask')}`")
+                idx = run.get("current_subtask_index", 0)
+                total = len(run.get("spec", {}).get("subtasks", []))
+                if total:
+                    lines.append(f"• Progreso: {idx}/{total} subtareas")
+
+        # Backlog de tareas
+        if ws_data:
+            from src.task_store import TaskStore
+            store = TaskStore(ws_data["repo_path"])
+            items = store.list_items()
+            todo = [i for i in items if i.status == "todo"]
+            done = [i for i in items if i.status == "done"]
+            blocked = [i for i in items if i.status == "blocked"]
+            lines.append(f"\n📋 **Backlog** (`{repo_name_from_url(ws_data.get('repo_url', ws_data['repo_path']))}`)")
+            lines.append(f"• Pendientes: {len(todo)} | Completadas: {len(done)} | Bloqueadas: {len(blocked)}")
+            for t in todo[:5]:
+                lines.append(f"  - `{t.id}`: {t.title[:60]}")
+            if len(todo) > 5:
+                lines.append(f"  ... y {len(todo)-5} más")
+
+        if lines:
+            await notify("\n".join(lines))
+        else:
+            await notify("No hay workspace activo ni tareas en ejecución.")
+        return True
 
     # --- do_next: ejecutar tareas pendientes del backlog activo ---
     if kind == "do_next":
