@@ -679,7 +679,9 @@ _HELP_TEXT = """🤖 *Comandos disponibles*
 /runwith <key> <tarea> — ejecuta tarea puntual con modelo específico
 /modelstats — métricas de uso por modelo
 /addmodel key=<k> model=<p/m> env=<VAR> key\_val=<val> — registra modelo nuevo
-/setkey <ENV\_VAR> <valor> — configura API key en memoria"""
+/setkey <ENV\_VAR> <valor> — configura API key en memoria
+/codexkey <api\_key> — autentica Codex CLI con API key
+/codexlogin — inicia device flow de Codex CLI (sin browser en servidor)"""
 
 
 async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -688,13 +690,86 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(_HELP_TEXT, parse_mode="Markdown", **_no_preview_kwargs())
 
 
+async def handle_codexlogin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Inicia device flow de Codex CLI y envía URL+código por Telegram."""
+    if update.effective_user.id != ALLOWED_USER:
+        return
 
+    await update.message.reply_text("🔐 Iniciando device flow de Codex CLI...", **_no_preview_kwargs())
+
+    import subprocess, threading
+
+    output_lines = []
+    proc = subprocess.Popen(
+        ["codex", "login", "--device-auth"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1,
+    )
+
+    for line in proc.stdout:
+        output_lines.append(line.strip())
+        if len(output_lines) >= 10:
+            break
+
+    msg = "🔐 *Codex Device Login*\n\n"
+    msg += "\n".join(output_lines) if output_lines else "Sin output del CLI."
+    msg += "\n\n_Abre la URL en tu navegador, ingresa el código y autoriza._"
+
+    await update.message.reply_text(msg, parse_mode="Markdown", **_no_preview_kwargs())
+
+    def wait_and_notify():
+        proc.wait()
+        status = subprocess.run(["codex", "login", "status"], capture_output=True, text=True).stdout.strip()
+        asyncio.run_coroutine_threadsafe(
+            update.message.reply_text(f"✅ Codex login: {status}", **_no_preview_kwargs()),
+            asyncio.get_event_loop(),
+        )
+
+    threading.Thread(target=wait_and_notify, daemon=True).start()
+
+
+async def handle_codexkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Configura Codex CLI con API key directamente via --with-api-key."""
+    if update.effective_user.id != ALLOWED_USER:
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "Uso: `/codexkey <OPENAI_API_KEY>`\nEjemplo: `/codexkey sk-proj-xxx`",
+            parse_mode="Markdown", **_no_preview_kwargs()
+        )
+        return
+
+    import subprocess, os as _os
+    api_key = context.args[0].strip()
+
+    result = subprocess.run(
+        ["codex", "login", "--with-api-key"],
+        input=api_key, capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        _os.environ["OPENAI_API_KEY"] = api_key
+        from src.llm_registry import load_dynamic_models
+        load_dynamic_models()
+        status = subprocess.run(["codex", "login", "status"], capture_output=True, text=True).stdout.strip()
+        await update.message.reply_text(
+            f"✅ Codex CLI autenticado\n`{status}`\n\nModelo `codex_mini` activado en el registry.",
+            parse_mode="Markdown", **_no_preview_kwargs()
+        )
+    else:
+        await update.message.reply_text(
+            f"❌ Error: {result.stdout or result.stderr}", **_no_preview_kwargs()
+        )
+
+
+def main():
     global _bot_app
     _bot_app = ApplicationBuilder().token(TOKEN).build()
     _bot_app.add_handler(CommandHandler("start", handle_start))
     _bot_app.add_handler(CommandHandler("help", handle_help))
     _bot_app.add_handler(CommandHandler("addmodel", handle_addmodel))
     _bot_app.add_handler(CommandHandler("setkey", handle_setkey))
+    _bot_app.add_handler(CommandHandler("codexlogin", handle_codexlogin))
+    _bot_app.add_handler(CommandHandler("codexkey", handle_codexkey))
     _bot_app.add_handler(CommandHandler("workon", handle_workon))
     _bot_app.add_handler(CommandHandler("plan_tasks", handle_plan_tasks))
     _bot_app.add_handler(CommandHandler("addtask", handle_addtask))
