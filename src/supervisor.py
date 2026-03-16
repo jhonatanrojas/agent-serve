@@ -95,7 +95,7 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
             return "🔁 Loop detectado en planner. Abortando."
 
         notify_agent("planner", "Planificando tarea...")
-        is_complex, spec_summary = plan_task(user_message, mode=mode, manual_model_key=manual_model_key)
+        is_complex, spec_summary, planner_model = plan_task(user_message, mode=mode, manual_model_key=manual_model_key)
         if not is_complex:
             return "__SIMPLE__"
 
@@ -104,15 +104,16 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
             append_checkpoint(run_id, "planning_ready", "planning", {"message": user_message[:200]})
 
         state.spec_summary = spec_summary
-        state.spec = generate_spec(user_message, mode=mode, manual_model_key=manual_model_key)
+        spec, _ = generate_spec(user_message, mode=mode, manual_model_key=manual_model_key)
+        state.spec = spec
         state.stage = "analyzing"
         update_run_state(run_id, phase="analyzing", next_action="analyze", spec=state.spec)
         append_checkpoint(run_id, "phase_analyzing", "analyzing", {"spec_summary": spec_summary[:300]})
         notify(spec_summary)
     else:
         if not state.spec:
-            _, state.spec_summary = plan_task(user_message, mode=mode, manual_model_key=manual_model_key)
-            state.spec = generate_spec(user_message, mode=mode, manual_model_key=manual_model_key)
+            _, state.spec_summary, _ = plan_task(user_message, mode=mode, manual_model_key=manual_model_key)
+            state.spec, _ = generate_spec(user_message, mode=mode, manual_model_key=manual_model_key)
             update_run_state(run_id, spec=state.spec)
         notify(f"🔄 Reanudando desde `{next_action}`")
 
@@ -129,7 +130,8 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
             state.stage = "coding"
         else:
             notify_agent("analyst", "Analizando codebase...")
-            state.analysis = analyze_codebase(user_message)
+            state.analysis, analyst_model = analyze_codebase(user_message)
+            notify(f"🤖 [analyst/{analyst_model}] análisis completado")
             state.stage = "coding"
             update_run_state(run_id, phase="coding", next_action="code_subtask_1")
             append_event(run_id, "analysis_completed", "analyzing", {"summary": state.analysis[:300]})

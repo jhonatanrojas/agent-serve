@@ -43,12 +43,12 @@ Responde SOLO con un JSON con esta estructura:
 Tarea: {message}"""
 
 
-def classify_task(message: str, mode: str = "auto", manual_model_key: str | None = None) -> dict:
-    """Retorna {"complexity": "simple"} o {"complexity": "complex", "reason": "..."}"""
+def classify_task(message: str, mode: str = "auto", manual_model_key: str | None = None) -> tuple[dict, str]:
+    """Retorna ({"complexity": "simple"|"complex", ...}, model_used)"""
     msg_lower = message.lower()
     if any(signal in msg_lower for signal in _COMPLEX_SIGNALS):
         log.info("Tarea clasificada como compleja por palabras clave")
-        return {"complexity": "complex", "reason": "contiene señales de alta complejidad"}
+        return {"complexity": "complex", "reason": "contiene señales de alta complejidad"}, "keyword"
 
     try:
         result = run_llm(
@@ -62,14 +62,14 @@ def classify_task(message: str, mode: str = "auto", manual_model_key: str | None
         content = content.replace("```json", "").replace("```", "").strip()
         start = content.find("{")
         end = content.rfind("}") + 1
-        return json.loads(content[start:end])
+        return json.loads(content[start:end]), result.model_used
     except Exception as e:
         log.warning("Error clasificando tarea: %s — asumiendo simple", e)
-        return {"complexity": "simple"}
+        return {"complexity": "simple"}, "?"
 
 
-def generate_spec(message: str, mode: str = "auto", manual_model_key: str | None = None) -> dict:
-    """Llama al LLM para generar una spec estructurada."""
+def generate_spec(message: str, mode: str = "auto", manual_model_key: str | None = None) -> tuple[dict, str]:
+    """Llama al LLM para generar una spec estructurada. Retorna (spec, model_used)."""
     try:
         result = run_llm(
             messages=[{"role": "user", "content": _SPEC_PROMPT.format(message=message)}],
@@ -82,10 +82,10 @@ def generate_spec(message: str, mode: str = "auto", manual_model_key: str | None
         content = content.replace("```json", "").replace("```", "").strip()
         start = content.find("{")
         end = content.rfind("}") + 1
-        return json.loads(content[start:end])
+        return json.loads(content[start:end]), result.model_used
     except Exception as e:
         log.error("Error generando spec: %s", e)
-        return {"title": "spec", "objective": message, "subtasks": [], "error": str(e)}
+        return {"title": "spec", "objective": message, "subtasks": [], "error": str(e)}, "?"
 
 
 def save_spec(spec: dict) -> str:
@@ -119,17 +119,17 @@ def save_spec(spec: dict) -> str:
     return str(path)
 
 
-def plan_task(message: str, mode: str = "auto", manual_model_key: str | None = None) -> tuple[bool, str]:
+def plan_task(message: str, mode: str = "auto", manual_model_key: str | None = None) -> tuple[bool, str, str]:
     """
     Evalúa la tarea. Si es compleja, genera y guarda spec.
-    Retorna (is_complex, spec_summary_or_empty).
+    Retorna (is_complex, spec_summary_or_empty, model_used).
     """
-    classification = classify_task(message, mode=mode, manual_model_key=manual_model_key)
+    classification, model_used = classify_task(message, mode=mode, manual_model_key=manual_model_key)
     if classification.get("complexity") != "complex":
-        return False, ""
+        return False, "", model_used
 
     log.info("Tarea compleja detectada. Generando spec...")
-    spec = generate_spec(message, mode=mode, manual_model_key=manual_model_key)
+    spec, model_used = generate_spec(message, mode=mode, manual_model_key=manual_model_key)
     path = save_spec(spec)
 
     summary = (
@@ -138,4 +138,4 @@ def plan_task(message: str, mode: str = "auto", manual_model_key: str | None = N
         f"**Subtareas**:\n" +
         "\n".join(f"  - {s}" for s in spec.get("subtasks", []))
     )
-    return True, summary
+    return True, summary, model_used
