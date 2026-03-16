@@ -99,6 +99,17 @@ MODELS_REGISTRY: dict[str, ModelEntry] = {
         use_cases=["coder", "tests"],
         enabled=bool(os.getenv("MISTRAL_API_KEY")),
     ),
+    "codex_mini": ModelEntry(
+        key="codex_mini",
+        model="openai/codex-mini-latest",
+        priority=3,
+        supports_tools=True,
+        supports_reasoning=False,
+        supports_long_context=False,
+        use_cases=["coder", "tests"],
+        enabled=bool(os.getenv("OPENAI_API_KEY")),
+        notes="OpenAI Codex — optimizado para generación de código",
+    ),
 }
 
 
