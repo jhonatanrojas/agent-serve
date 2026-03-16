@@ -226,7 +226,15 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
         except Exception:
             pass
 
-    if next_action in ("planning", "analyze") or next_action.startswith("code_subtask_"):
+    force_resume_coding = next_action == "review" and not state.modified_files
+    if force_resume_coding:
+        notify("ℹ️ No hay archivos modificados al reanudar en review; retomando codificación desde subtareas pendientes.")
+        _trace_decision(run_id, "coding", "resume_review_without_changes", {
+            "next_action": next_action,
+            "completed_subtasks": len(completed_subtasks),
+        }, risk_level="medium")
+
+    if next_action in ("planning", "analyze") or next_action.startswith("code_subtask_") or force_resume_coding:
         failure_causes: dict[str, int] = {}
         consecutive_no_change = 0
         milestone_step = max(1, len(coding_subtasks) // 3)

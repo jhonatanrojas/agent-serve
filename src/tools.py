@@ -406,12 +406,23 @@ def notion_tool(tool_name: str, arguments: dict) -> str:
 
 
 _SERENA_OUTPUT_LIMIT = 3000  # chars máx para tools Serena verbosas
+_SERENA_OUTPUT_RETRY_LIMIT = 12000
 
 def serena_tool(tool_name: str, arguments: dict) -> str:
     # Inyectar límite de output para tools que lo soportan
     if tool_name in ("list_dir", "find_file", "find_symbol", "search_files_by_name"):
         arguments = {**arguments, "max_answer_chars": _SERENA_OUTPUT_LIMIT}
     result = serena_mcp.call_tool(tool_name, arguments)
+
+    # Algunas tools (especialmente list_dir) pueden devolver un error pidiendo
+    # explícitamente subir max_answer_chars. Reintentamos una vez con un límite
+    # mayor para evitar bloqueos innecesarios en flujos automáticos.
+    if (
+        "The answer is too long" in str(result)
+        and tool_name in ("list_dir", "find_file", "find_symbol", "search_files_by_name")
+    ):
+        retry_args = {**arguments, "max_answer_chars": _SERENA_OUTPUT_RETRY_LIMIT}
+        result = serena_mcp.call_tool(tool_name, retry_args)
 
     if "The answer is too long" in str(result):
         return (f"ERROR (Output Limit): El resultado de `{tool_name}` es demasiado extenso para procesarlo. "
