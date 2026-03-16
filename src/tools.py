@@ -201,10 +201,30 @@ def read_task_context(section: str) -> str:
     return f"REQUEST_CONTEXT_SECTION: {section}"
 
 
-def read_file(path: str) -> str:
+_READ_FILE_LINE_LIMIT = 200  # líneas por página por defecto
+
+def read_file(path: str, start_line: int = 1, end_line: int | None = None) -> str:
+    """Lee un archivo completo o un rango de líneas (paginado).
+    start_line y end_line son 1-indexed. Si el archivo supera _READ_FILE_LINE_LIMIT
+    líneas y no se especifica rango, devuelve la primera página con hint de paginación.
+    """
     try:
         safe_path = resolve_repo_path(path)
-        return safe_path.read_text()
+        lines = safe_path.read_text().splitlines(keepends=True)
+        total = len(lines)
+
+        # Auto-paginar si el archivo es grande y no se pidió rango explícito
+        if end_line is None and total > _READ_FILE_LINE_LIMIT:
+            chunk = lines[:_READ_FILE_LINE_LIMIT]
+            hint = (f"\n\n[PAGINADO] Mostrando líneas 1-{_READ_FILE_LINE_LIMIT} de {total}. "
+                    f"Usa read_file(path, start_line=N, end_line=M) para leer más.")
+            return "".join(chunk) + hint
+
+        s = max(0, start_line - 1)
+        e = end_line if end_line is not None else total
+        chunk = lines[s:e]
+        header = f"[Líneas {s+1}-{min(e, total)} de {total}]\n" if (start_line > 1 or end_line is not None) else ""
+        return header + "".join(chunk)
     except PathSandboxError:
         repo_root = get_active_repo_path()
         return (f"ERROR DE ACCESO: No tienes permiso para leer archivos fuera del repositorio activo: '{repo_root}'. "
@@ -364,10 +384,18 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Lee el contenido de un archivo",
+            "description": (
+                "Lee el contenido de un archivo. Si el archivo es largo (>200 líneas) devuelve "
+                "la primera página automáticamente con un hint de paginación. "
+                "Usa start_line y end_line para leer secciones específicas."
+            ),
             "parameters": {
                 "type": "object",
-                "properties": {"path": {"type": "string"}},
+                "properties": {
+                    "path": {"type": "string"},
+                    "start_line": {"type": "integer", "description": "Línea inicial (1-indexed, opcional)"},
+                    "end_line": {"type": "integer", "description": "Línea final inclusiva (opcional)"},
+                },
                 "required": ["path"],
             },
         },
@@ -425,6 +453,11 @@ def serena_tool(tool_name: str, arguments: dict) -> str:
         result = serena_mcp.call_tool(tool_name, retry_args)
 
     if "The answer is too long" in str(result):
+        # Último recurso: pedir solo el primer nivel con depth=0 para no bloquear el flujo
+        shallow_args = {**arguments, "max_answer_chars": _SERENA_OUTPUT_RETRY_LIMIT, "depth": 0}
+        result = serena_mcp.call_tool(tool_name, shallow_args)
+
+    if "The answer is too long" in str(result):
         return (f"ERROR (Output Limit): El resultado de `{tool_name}` es demasiado extenso para procesarlo. "
                 f"Por favor, intenta ser más específico. Si usaste `list_dir`, intenta listar una subcarpeta concreta "
                 f"(ej. 'src/') en lugar de la raíz. Evita carpetas con demasiados archivos como 'node_modules'.")
@@ -468,7 +501,7 @@ TOOL_MAP = {
     "git_push_branch": lambda args: git_push_branch(args["branch"]),
     "git_approve_push": lambda args: git_approve_push(args["branch"]),
     "create_spec": lambda args: create_spec(args["title"], args["content"]),
-    "read_file": lambda args: read_file(args["path"]),
+    "read_file": lambda args: read_file(args["path"], int(args.get("start_line", 1)), args.get("end_line") and int(args["end_line"])),
     "write_file": lambda args: write_file(args["path"], args["content"]),
     "add_memory": lambda args: add_memory(args["text"]),
     "search_memory": lambda args: search_memory(args["query"]),
