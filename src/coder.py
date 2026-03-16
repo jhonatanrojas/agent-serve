@@ -39,7 +39,7 @@ Reglas estrictas:
 - Para ver detalles técnicos completos (análisis, arquitectura o especificación técnica), DEBES usar la herramienta `read_task_context(section=...)`. No asumas detalles no presentes en el resumen.
 - NO entregues solo análisis o explicación: debes aplicar cambios reales en archivos cuando la subtarea sea de implementación.
 - Si la subtarea es solo "analizar", "investigar" o "documentar" sin pedir cambios de código, responde con "NECESITA_IMPLEMENTACION_EXPLICITA" y no finalices como completada.
-- Para cambiar código usa herramientas de edición (write_file/replace_content/replace_symbol_body/etc.).
+- Para cambiar código usa herramientas de edición. IMPORTANTE: usa `write_file` para escribir archivos completos (CSS, HTML, JS). Usa `replace_content` SOLO para reemplazos pequeños de texto (menos de 200 caracteres en el argumento `repl`). Nunca metas CSS o HTML completo en `replace_content` — usa `write_file` en su lugar.
 - Cuando hayas terminado la implementación, llama OBLIGATORIAMENTE a `subtask_done(status='completed', reason='...')`.
 - Si determinas que la subtarea no requiere cambios de código tras analizar los archivos, llama a `subtask_done(status='no_changes_needed', reason='...')`.
 - Responde en español."""
