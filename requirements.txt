@@ -6,3 +6,4 @@ python-dotenv
 mem0ai
 duckduckgo-search
 apscheduler
+json-repair>=0.30.0

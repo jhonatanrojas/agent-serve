@@ -52,17 +52,15 @@ def execute_tool_call(tc) -> tuple[str, dict, str]:
     try:
         args = json.loads(tc.function.arguments)
     except json.JSONDecodeError as e:
-        log.error("JSON inválido en tool %s: %s", name, e)
-        return name, {}, f"Error: argumentos JSON inválidos en `{name}`"
-
-def execute_tool_call(tc) -> tuple[str, dict, str]:
-    """Ejecuta una tool call. Retorna (name, args, result). Nunca lanza excepción."""
-    name = tc.function.name
-    try:
-        args = json.loads(tc.function.arguments)
-    except json.JSONDecodeError as e:
-        log.error("JSON inválido en tool %s: %s", name, e)
-        return name, {}, f"Error: argumentos JSON inválidos en `{name}`"
+        # Intentar reparar JSON malformado (frecuente en contenido CSS/HTML con caracteres especiales)
+        try:
+            from json_repair import repair_json
+            repaired = repair_json(tc.function.arguments)
+            args = json.loads(repaired)
+            log.warning("JSON reparado en tool %s (original inválido: %s)", name, e)
+        except Exception:
+            log.error("JSON inválido en tool %s: %s", name, e)
+            return name, {}, f"Error: argumentos JSON inválidos en `{name}`"
 
     # Normalizar alias comunes de argumentos
     _ARG_ALIASES = {"relative_path": "path", "file_path": "path", "filename": "path"}
