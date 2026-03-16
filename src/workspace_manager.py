@@ -40,6 +40,7 @@ def _conn() -> sqlite3.Connection:
             chat_id TEXT PRIMARY KEY,
             repo_url TEXT,
             notion_database_id TEXT,
+            task_mode TEXT DEFAULT "local",
             repo_path TEXT NOT NULL,
             active_branch TEXT NOT NULL,
             created_at TEXT NOT NULL,
@@ -47,6 +48,11 @@ def _conn() -> sqlite3.Connection:
         )
         """
     )
+
+    try:
+        conn.execute("ALTER TABLE workspace_sessions ADD COLUMN task_mode TEXT DEFAULT 'local'")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     return conn
 
@@ -75,7 +81,7 @@ class WorkspaceManager:
         with _conn() as conn:
             row = conn.execute(
                 """
-                SELECT chat_id, repo_url, notion_database_id, repo_path, active_branch, created_at, updated_at
+                SELECT chat_id, repo_url, notion_database_id, task_mode, repo_path, active_branch, created_at, updated_at
                 FROM workspace_sessions WHERE chat_id=?
                 """,
                 (chat_key,),
@@ -85,16 +91,18 @@ class WorkspaceManager:
                 "chat_id": row[0],
                 "repo_url": row[1] or "",
                 "notion_database_id": row[2] or "",
-                "repo_path": row[3],
-                "active_branch": row[4],
-                "created_at": row[5],
-                "updated_at": row[6],
+                "task_mode": row[3] or "local",
+                "repo_path": row[4],
+                "active_branch": row[5],
+                "created_at": row[6],
+                "updated_at": row[7],
             }
         # fallback legacy
         return {
             "chat_id": chat_key,
             "repo_url": "",
             "notion_database_id": "",
+            "task_mode": "local",
             "repo_path": str(self.repo_path),
             "active_branch": self._current_branch(self.repo_path),
             "created_at": _now(),
@@ -122,16 +130,17 @@ class WorkspaceManager:
         with _conn() as conn:
             conn.execute(
                 """
-                INSERT INTO workspace_sessions(chat_id, repo_url, notion_database_id, repo_path, active_branch, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO workspace_sessions(chat_id, repo_url, notion_database_id, task_mode, repo_path, active_branch, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(chat_id) DO UPDATE SET
                     repo_url=excluded.repo_url,
                     notion_database_id=excluded.notion_database_id,
+                    task_mode=excluded.task_mode,
                     repo_path=excluded.repo_path,
                     active_branch=excluded.active_branch,
                     updated_at=excluded.updated_at
                 """,
-                (chat_key, repo_url, notion_database_id, str(repo_dir), branch, ts, ts),
+                (chat_key, repo_url, notion_database_id, "local", str(repo_dir), branch, ts, ts),
             )
             conn.commit()
         return self.get_active_workspace(chat_key)
@@ -145,6 +154,18 @@ class WorkspaceManager:
             conn.execute(
                 "UPDATE workspace_sessions SET active_branch=?, updated_at=? WHERE chat_id=?",
                 (branch, _now(), str(chat_id)),
+            )
+            conn.commit()
+        return self.get_active_workspace(chat_id)
+
+    def set_task_mode(self, chat_id: str | int, mode: str) -> dict:
+        mode = (mode or "local").lower()
+        if mode not in {"local", "notion", "hybrid"}:
+            raise WorkspaceError("Modo inválido. Usa local|notion|hybrid")
+        with _conn() as conn:
+            conn.execute(
+                "UPDATE workspace_sessions SET task_mode=?, updated_at=? WHERE chat_id=?",
+                (mode, _now(), str(chat_id)),
             )
             conn.commit()
         return self.get_active_workspace(chat_id)

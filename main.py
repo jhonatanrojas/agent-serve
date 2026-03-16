@@ -12,10 +12,14 @@ from src.run_state import get_latest_active_run, get_latest_run
 from src.scheduler import set_send_callback
 from src.supervisor import resume_run, run_supervisor
 from src.task_provider_notion import NotionTaskProvider
+from src.task_source_router import TaskSourceRouter
+from src.task_store import TaskStore
+from src.task_file_manager import TaskFileManager
 from src.tools import git_diff_summary
 from src.llm_registry import models_status_text, get_model
 from src.chat_preferences import get_preference, set_auto, set_manual
 from src.llm_runner import stats_text
+from src.work_item import WorkItem
 from src.workspace_context import set_active_repo_path
 from src.workspace_manager import WorkspaceError, WorkspaceManager
 
@@ -132,8 +136,7 @@ async def handle_plan_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ALLOWED_USER:
         return
     ws = _set_workspace_context(update.effective_chat.id)
-    provider = NotionTaskProvider()
-    tasks = provider.list_tasks(ws.get("notion_database_id", ""))
+    tasks = TaskSourceRouter(ws).list_tasks()
     repo_hint = ws.get("repo_url", "")
     eligible = [t for t in tasks if not t.repo_hint or (repo_hint and t.repo_hint.lower() in repo_hint.lower())]
     if not eligible:
@@ -157,18 +160,24 @@ async def handle_do_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     ws = _set_workspace_context(update.effective_chat.id)
-    provider = NotionTaskProvider()
-    tasks = provider.list_tasks(ws.get("notion_database_id", ""))
+    router = TaskSourceRouter(ws)
+    store = TaskStore(ws["repo_path"])
+    manager = TaskFileManager(ws["repo_path"])
+    tasks = router.list_tasks()
     task_id = context.args[0]
     task = next((t for t in tasks if t.id.startswith(task_id) or t.id == task_id), None)
     if not task:
-        await update.message.reply_text("Task no encontrada en Notion.", **_no_preview_kwargs())
+        await update.message.reply_text("Task no encontrada.", **_no_preview_kwargs())
         return
 
     branch = RepoManager(ws["repo_path"]).ensure_task_branch(task.id[:8])
     WorkspaceManager().set_active_branch(update.effective_chat.id, branch)
 
-    provider.update_task_status(task.page_id, "In progress")
+    if task.source == "notion":
+        NotionTaskProvider().update_task_status(task.page_id, "In progress")
+    else:
+        store.update_status(task.id, "in_progress")
+        manager.update_task_file(WorkItem.from_dict({**task.to_dict(), "status": "in_progress"}), "Inicio de ejecución")
     await update.message.reply_text(f"🚀 Ejecutando tarea {task.id[:8]} en branch `{branch}`", **_no_preview_kwargs())
     loop = asyncio.get_event_loop()
 
@@ -183,7 +192,12 @@ async def handle_do_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async def finalize_and_watch():
         result = await _current_task
         status = "Done" if "Tarea completada" in result else "Blocked"
-        provider.update_task_status(task.page_id, status)
+        if task.source == "notion":
+            NotionTaskProvider().update_task_status(task.page_id, status)
+        else:
+            local_status = "done" if status == "Done" else "blocked"
+            store.update_status(task.id, local_status)
+            manager.update_task_file(WorkItem.from_dict({**task.to_dict(), "status": local_status}), f"Fin de ejecución: {local_status}")
         await update.message.reply_text(result, **_no_preview_kwargs())
         await update.message.reply_text("Esta tarea quedó finalizada. ¿Deseas que continúe con la siguiente?", **_no_preview_kwargs())
 
@@ -191,18 +205,132 @@ async def handle_do_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_do_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global _current_task
+    if update.effective_user.id != ALLOWED_USER:
+        return
+    if _current_task and not _current_task.done():
+        await update.message.reply_text("⏳ Ya hay una tarea en ejecución.", **_no_preview_kwargs())
+        return
+    ws = _set_workspace_context(update.effective_chat.id)
+    next_task = TaskSourceRouter(ws).next_task()
+    if not next_task:
+        await update.message.reply_text("No hay siguiente tarea elegible.", **_no_preview_kwargs())
+        return
+    context.args[:] = [next_task.id]
+    await handle_do_task(update, context)
+
+
+def _parse_task_line(text: str) -> tuple[str, str, list[str]]:
+    parts = [p.strip() for p in text.split("|")]
+    title = parts[0] if parts else ""
+    description = parts[1] if len(parts) > 1 else ""
+    deps = [d.strip() for d in (parts[2].split(",") if len(parts) > 2 else []) if d.strip()]
+    return title, description, deps
+
+
+async def handle_addtask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ALLOWED_USER:
         return
     ws = _set_workspace_context(update.effective_chat.id)
-    provider = NotionTaskProvider()
-    tasks = provider.list_tasks(ws.get("notion_database_id", ""))
-    repo_hint = ws.get("repo_url", "")
-    eligible = [t for t in tasks if (t.status or "").lower() not in {"done", "completed"} and (not t.repo_hint or (repo_hint and t.repo_hint.lower() in repo_hint.lower()))]
-    if not eligible:
-        await update.message.reply_text("No hay siguiente tarea elegible.", **_no_preview_kwargs())
+    if not context.args:
+        await update.message.reply_text("Uso: /addtask titulo | descripción | TASK-001,TASK-002", **_no_preview_kwargs())
         return
-    context.args[:] = [eligible[0].id]
-    await handle_do_task(update, context)
+    raw = " ".join(context.args)
+    title, description, deps = _parse_task_line(raw)
+    store = TaskStore(ws["repo_path"])
+    item = store.add_item(title=title, description=description, depends_on=deps)
+    TaskFileManager(ws["repo_path"]).create_task_file(item)
+    await update.message.reply_text(f"✅ Creada {item.id}: {item.title}", **_no_preview_kwargs())
+
+
+async def handle_addtasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ALLOWED_USER:
+        return
+    ws = _set_workspace_context(update.effective_chat.id)
+    raw = " ".join(context.args)
+    if not raw:
+        await update.message.reply_text("Uso: /addtasks task1 ; task2 ; task3", **_no_preview_kwargs())
+        return
+    created = []
+    store = TaskStore(ws["repo_path"])
+    manager = TaskFileManager(ws["repo_path"])
+    for row in [x.strip() for x in raw.split(";") if x.strip()]:
+        title, description, deps = _parse_task_line(row)
+        item = store.add_item(title, description, deps)
+        manager.create_task_file(item)
+        created.append(item.id)
+    await update.message.reply_text(f"✅ Creadas: {', '.join(created)}", **_no_preview_kwargs())
+
+
+async def handle_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ALLOWED_USER:
+        return
+    ws = _set_workspace_context(update.effective_chat.id)
+    items = TaskStore(ws["repo_path"]).list_items()
+    if not items:
+        await update.message.reply_text("No hay tareas locales.", **_no_preview_kwargs())
+        return
+    lines = ["🗂️ Backlog local:"]
+    for it in items[:30]:
+        lines.append(f"- {it.id} | {it.status} | {it.title}")
+    await update.message.reply_text("\n".join(lines), **_no_preview_kwargs())
+
+
+async def handle_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ALLOWED_USER:
+        return
+    if not context.args:
+        await update.message.reply_text("Uso: /task <TASK-XXX>", **_no_preview_kwargs())
+        return
+    ws = _set_workspace_context(update.effective_chat.id)
+    task = TaskStore(ws["repo_path"]).get_item(context.args[0])
+    if not task:
+        await update.message.reply_text("No existe la tarea solicitada.", **_no_preview_kwargs())
+        return
+    deps = ", ".join(task.depends_on) if task.depends_on else "-"
+    await update.message.reply_text(f"{task.id} | {task.status}\n{task.title}\nDeps: {deps}\n\n{task.description}", **_no_preview_kwargs())
+
+
+async def handle_taskmode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ALLOWED_USER:
+        return
+    manager = WorkspaceManager()
+    if not context.args:
+        ws = manager.get_active_workspace(update.effective_chat.id)
+        await update.message.reply_text(f"Modo actual: {ws.get('task_mode', 'local')}", **_no_preview_kwargs())
+        return
+    try:
+        ws = manager.set_task_mode(update.effective_chat.id, context.args[0])
+        await update.message.reply_text(f"✅ task_mode={ws.get('task_mode')}", **_no_preview_kwargs())
+    except WorkspaceError as e:
+        await update.message.reply_text(f"❌ {e}", **_no_preview_kwargs())
+
+
+async def handle_sync_notion_to_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ALLOWED_USER:
+        return
+    ws = _set_workspace_context(update.effective_chat.id)
+    notion_items = NotionTaskProvider().list_tasks(ws.get("notion_database_id", ""))
+    store = TaskStore(ws["repo_path"])
+    manager = TaskFileManager(ws["repo_path"])
+    imported = 0
+    for n in notion_items:
+        exists = store.get_item(n.id)
+        if exists:
+            continue
+        local = WorkItem.from_dict({**n.to_dict(), "id": n.id, "source": "notion", "status": (n.status or 'todo').lower()})
+        store.upsert_item(local)
+        manager.create_task_file(local)
+        imported += 1
+    await update.message.reply_text(f"✅ Importadas {imported} tareas desde Notion.", **_no_preview_kwargs())
+
+
+async def handle_export_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ALLOWED_USER:
+        return
+    ws = _set_workspace_context(update.effective_chat.id)
+    path = TaskStore(ws["repo_path"]).export_json()
+    await update.message.reply_text(f"📦 Export local: {path}", **_no_preview_kwargs())
 
 
 async def handle_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -369,8 +497,15 @@ def main():
     _bot_app = ApplicationBuilder().token(TOKEN).build()
     _bot_app.add_handler(CommandHandler("workon", handle_workon))
     _bot_app.add_handler(CommandHandler("plan_tasks", handle_plan_tasks))
+    _bot_app.add_handler(CommandHandler("addtask", handle_addtask))
+    _bot_app.add_handler(CommandHandler("addtasks", handle_addtasks))
     _bot_app.add_handler(CommandHandler("do_task", handle_do_task))
     _bot_app.add_handler(CommandHandler("do_next", handle_do_next))
+    _bot_app.add_handler(CommandHandler("tasks", handle_tasks))
+    _bot_app.add_handler(CommandHandler("task", handle_task))
+    _bot_app.add_handler(CommandHandler("taskmode", handle_taskmode))
+    _bot_app.add_handler(CommandHandler("sync_notion_to_tasks", handle_sync_notion_to_tasks))
+    _bot_app.add_handler(CommandHandler("export_tasks", handle_export_tasks))
     _bot_app.add_handler(CommandHandler("stop", handle_stop))
     _bot_app.add_handler(CommandHandler("status", handle_status))
     _bot_app.add_handler(CommandHandler("plan", handle_plan))
@@ -392,7 +527,7 @@ def main():
 
     set_send_callback(sync_send)
 
-    print("🚀 Agent server corriendo... (/workon /plan_tasks /do_task /do_next /stop /status /plan /resume /logs /diff /models /model /runwith /modelstats)")
+    print("🚀 Agent server corriendo... (/workon /plan_tasks /addtask /addtasks /do_task /do_next /tasks /task /taskmode /sync_notion_to_tasks /export_tasks /stop /status /plan /resume /logs /diff /models /model /runwith /modelstats)")
     _bot_app.run_polling(drop_pending_updates=True, allowed_updates=["message"])
 
 

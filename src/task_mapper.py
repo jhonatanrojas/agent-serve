@@ -1,15 +1,4 @@
-from dataclasses import dataclass
-
-
-@dataclass
-class WorkItem:
-    id: str
-    title: str
-    description: str
-    repo_hint: str
-    page_id: str
-    status: str
-    priority: str = ""
+from src.work_item import WorkItem
 
 
 def map_notion_page_to_work_item(page: dict) -> WorkItem:
@@ -38,6 +27,7 @@ def map_notion_page_to_work_item(page: dict) -> WorkItem:
         description=_txt("Description") or _txt("Task") or "",
         repo_hint=_txt("Repository") or _txt("Repo") or "",
         page_id=page.get("id", ""),
-        status=_txt("Status") or "",
+        status=_txt("Status") or "todo",
         priority=_txt("Priority") or "",
+        source="notion",
     )
