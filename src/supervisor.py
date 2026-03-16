@@ -277,6 +277,16 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
                     if i % milestone_step == 0 or i == len(coding_subtasks):
                         append_checkpoint(run_id, "milestone_reached", "coding", {"completed": i, "total": len(coding_subtasks)})
                         notify(f"🏁 Milestone {i}/{len(coding_subtasks)} alcanzado")
+                    
+                    # Commits incrementales
+                    try:
+                        from src.tools import git_commit
+                        commit_msg = f"subtask {i}: {subtask[:60]}"
+                        git_commit(commit_msg)
+                        notify(f"📝 Commit incremental: `{commit_msg}`")
+                    except Exception as e:
+                        log.warning("No se pudo realizar commit incremental: %s", e)
+
                     append_checkpoint(run_id, "subtask_completed", "coding", {"subtask": subtask, "modified_files": result.get("modified_files", []), "attempt": attempt_count})
                     update_run_state(
                         run_id,
@@ -309,6 +319,22 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
                 strategy_used = decision.strategy
                 if decision.action == "retry":
                     continue
+                
+                if decision.action == "replan":
+                    reason = f"Re-planning dinámico iniciado por fallo en subtarea {i}: {failure_type}"
+                    _trace_decision(run_id, "coding", "replan_requested", {"subtask": subtask, "reason": reason})
+                    notify(f"🔄 {reason}")
+                    
+                    # Generar nueva spec basada en lo que queda
+                    remaining_user_msg = f"Continuar tarea: {user_message}. Subtareas completadas: {list(completed_subtasks)}. Error en actual: {result.get('result', '')}"
+                    new_spec, _ = generate_spec(remaining_user_msg, mode=mode, manual_model_key=manual_model_key)
+                    
+                    if new_spec.get("subtasks"):
+                        state.spec["subtasks"] = new_spec["subtasks"]
+                        update_run_state(run_id, spec=state.spec)
+                        notify("✅ Nueva Spec generada. Reiniciando ejecución de subtareas restantes.")
+                        # Reiniciar el bucle de subtareas con la nueva lista
+                        return run_supervisor(user_message, progress_callback, run_id, completed_subtasks, mode, manual_model_key, task_id)
 
                 append_event(run_id, "run_paused", "coding", {"subtask": subtask, "reason": decision.reason, "attempt": attempt_count})
                 append_checkpoint(run_id, "paused_by_recovery", "coding", {"subtask": subtask, "reason": decision.reason, "attempt": attempt_count})

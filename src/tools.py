@@ -189,12 +189,26 @@ def create_spec(title: str, content: str) -> str:
         return f"Error creando spec: {e}"
 
 
+def subtask_done(status: str, reason: str) -> str:
+    """Señala que la subtarea ha sido completada, con o sin cambios de código."""
+    return f"SUBTASK_DONE_SIGNAL: {status} | {reason}"
+
+
+def read_task_context(section: str) -> str:
+    """Lee secciones específicas del contexto de la tarea (especificación, análisis, etc.)."""
+    # Esta función actúa como una tool de conveniencia. El contenido real es inyectado
+    # por el orquestador en el prompt o manejado vía memoria temporal.
+    return f"REQUEST_CONTEXT_SECTION: {section}"
+
+
 def read_file(path: str) -> str:
     try:
         safe_path = resolve_repo_path(path)
         return safe_path.read_text()
-    except PathSandboxError as e:
-        return f"Error leyendo archivo: {e}"
+    except PathSandboxError:
+        repo_root = get_active_repo_path()
+        return (f"ERROR DE ACCESO: No tienes permiso para leer archivos fuera del repositorio activo: '{repo_root}'. "
+                f"Estás intentando leer '{path}'. Asegúrate de trabajar SOLO dentro de los límites del proyecto asignado.")
     except Exception as e:
         return f"Error leyendo archivo: {e}"
 
@@ -205,8 +219,10 @@ def write_file(path: str, content: str) -> str:
         safe_path.parent.mkdir(parents=True, exist_ok=True)
         safe_path.write_text(content)
         return f"Archivo escrito: {safe_path}"
-    except PathSandboxError as e:
-        return f"Error escribiendo archivo: {e}"
+    except PathSandboxError:
+        repo_root = get_active_repo_path()
+        return (f"ERROR DE ACCESO: No tienes permiso para escribir archivos fuera del repositorio activo: '{repo_root}'. "
+                f"Estás intentando escribir en '{path}'. Asegúrate de trabajar SOLO dentro de los límites del proyecto asignado.")
     except Exception as e:
         return f"Error escribiendo archivo: {e}"
 
@@ -380,6 +396,8 @@ TOOLS = [
     {"type": "function", "function": {"name": "schedule_task", "description": "Programa una tarea recurrente con expresión cron", "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}, "cron_expr": {"type": "string", "description": "5 campos: minuto hora día mes día_semana. Ej: '0 9 * * 1' = lunes 9am"}, "command": {"type": "string"}}, "required": ["task_id", "cron_expr", "command"]}}},
     {"type": "function", "function": {"name": "list_tasks", "description": "Lista las tareas programadas", "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "remove_task", "description": "Elimina una tarea programada", "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}}},
+    {"type": "function", "function": {"name": "subtask_done", "description": "Finaliza la subtarea actual. Úsala cuando hayas terminado la implementación o cuando determines que no se requieren cambios.", "parameters": {"type": "object", "properties": {"status": {"type": "string", "enum": ["completed", "no_changes_needed"]}, "reason": {"type": "string", "description": "Explicación de por qué se marca como terminada"}}, "required": ["status", "reason"]}}},
+    {"type": "function", "function": {"name": "read_task_context", "description": "Lee el contenido detallado de una sección del contexto (especificación, análisis previo, arquitectura).", "parameters": {"type": "object", "properties": {"section": {"type": "string", "enum": ["spec", "analysis", "technical_details"]}}, "required": ["section"]}}},
     {"type": "function", "function": {"name": "codex_exec", "description": "Ejecuta una tarea de implementación de código usando Codex CLI (sesión activa). Úsalo para subtareas de codificación complejas.", "parameters": {"type": "object", "properties": {"prompt": {"type": "string", "description": "Instrucción de implementación para Codex"}}, "required": ["prompt"]}}},
 ]
 
@@ -394,9 +412,15 @@ def serena_tool(tool_name: str, arguments: dict) -> str:
     if tool_name in ("list_dir", "find_file", "find_symbol", "search_files_by_name"):
         arguments = {**arguments, "max_answer_chars": _SERENA_OUTPUT_LIMIT}
     result = serena_mcp.call_tool(tool_name, arguments)
+
+    if "The answer is too long" in str(result):
+        return (f"ERROR (Output Limit): El resultado de `{tool_name}` es demasiado extenso para procesarlo. "
+                f"Por favor, intenta ser más específico. Si usaste `list_dir`, intenta listar una subcarpeta concreta "
+                f"(ej. 'src/') en lugar de la raíz. Evita carpetas con demasiados archivos como 'node_modules'.")
+
     # Truncar igualmente por si acaso
     if isinstance(result, str) and len(result) > _SERENA_OUTPUT_LIMIT:
-        result = result[:_SERENA_OUTPUT_LIMIT] + "\n...[truncado]"
+        result = result[:_SERENA_OUTPUT_LIMIT] + "\n...[truncado por límite de seguridad]"
     return result
 
 
@@ -444,6 +468,8 @@ TOOL_MAP = {
     "schedule_task": lambda args: schedule_task(args["task_id"], args["cron_expr"], args["command"]),
     "list_tasks": lambda args: list_tasks(),
     "remove_task": lambda args: remove_task(args["task_id"]),
+    "subtask_done": lambda args: subtask_done(args["status"], args["reason"]),
+    "read_task_context": lambda args: read_task_context(args["section"]),
     "codex_exec": lambda args: codex_exec(args["prompt"], args.get("writable_paths")),
     **{name: lambda args, n=name: notion_tool(n, args) for name in _notion_tool_names},
     **{name: lambda args, n=name: serena_tool(n, args) for name in _serena_tool_names},

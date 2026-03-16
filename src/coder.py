@@ -20,26 +20,28 @@ _CODER_ALLOWED_TOOLS = {
     "insert_after_symbol", "replace_symbol_body",
     # Codex CLI para implementación compleja
     "codex_exec",
+    "subtask_done",
+    "read_task_context",
 }
 
 _CODER_TOOLS = [t for t in TOOLS if t["function"]["name"] in _CODER_ALLOWED_TOOLS]
 
 _CODER_PROMPT = """Eres un agente coder especializado. Tu única responsabilidad es implementar la siguiente subtarea.
 
-Contexto del proyecto:
-{context}
+Resumen del Contexto:
+{context_summary}
 
 Subtarea a implementar:
 {subtask}
 
 Reglas estrictas:
 - Implementa SOLO lo que dice la subtarea, nada más.
-- No refactorices código fuera del alcance.
+- Para ver detalles técnicos completos (análisis, arquitectura o especificación técnica), DEBES usar la herramienta `read_task_context(section=...)`. No asumas detalles no presentes en el resumen.
 - NO entregues solo análisis o explicación: debes aplicar cambios reales en archivos cuando la subtarea sea de implementación.
 - Si la subtarea es solo "analizar", "investigar" o "documentar" sin pedir cambios de código, responde con "NECESITA_IMPLEMENTACION_EXPLICITA" y no finalices como completada.
 - Para cambiar código usa herramientas de edición (write_file/replace_content/replace_symbol_body/etc.).
-- Reporta cada archivo que modifiques.
-- Si algo es ambiguo, elige la opción más conservadora.
+- Cuando hayas terminado la implementación, llama OBLIGATORIAMENTE a `subtask_done(status='completed', reason='...')`.
+- Si determinas que la subtarea no requiere cambios de código tras analizar los archivos, llama a `subtask_done(status='no_changes_needed', reason='...')`.
 - Responde en español."""
 
 
@@ -75,7 +77,11 @@ def run_coder(subtask: str, context: str = "", progress_callback=None,
     llm_calls = 0
     tool_calls = 0
 
-    system = _CODER_PROMPT.format(context=context or "Sin contexto adicional.", subtask=subtask)
+    # RAG Dinámico: No inyectar todo el contexto, solo un resumen.
+    # El resto se servirá bajo demanda vía `read_task_context`.
+    context_summary = context[:1000] + "\n...(Resumen. Usa read_task_context para ver detalles completos)..." if len(context) > 1000 else context
+    
+    system = _CODER_PROMPT.format(context_summary=context_summary or "Sin contexto adicional.", subtask=subtask)
     messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": subtask},
@@ -192,10 +198,30 @@ def run_coder(subtask: str, context: str = "", progress_callback=None,
             tool_calls += 1
             ctx.record_tool(name, args, result, iteration + 1)
 
+            if "SUBTASK_DONE_SIGNAL" in str(result):
+                ctx.finish("completed")
+                log.info("Coder finalizó subtarea vía subtask_done: %s", result)
+                return {
+                    "result": str(result),
+                    "modified_files": ctx.modified_files,
+                    "status": "completed",
+                    "llm_calls": llm_calls,
+                    "tool_calls": tool_calls,
+                }
+
             loop_err = guard.record_result(name, result)
             if loop_err:
                 ctx.finish("loop_detected", loop_err)
                 return {"result": loop_err, "modified_files": ctx.modified_files, "status": "loop_detected", "llm_calls": llm_calls, "tool_calls": tool_calls}
+
+            if "REQUEST_CONTEXT_SECTION" in str(result):
+                section = args.get("section", "spec")
+                # El supervisor/coder inyecta el contenido real de la memoria aquí
+                if section == "analysis":
+                    ctx_content = context # En este MVP, 'context' contiene el análisis/spec completo pasado por el supervisor
+                else:
+                    ctx_content = context
+                result = f"CONTENIDO DE SECCIÓN '{section}':\n\n{ctx_content}"
 
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
 
