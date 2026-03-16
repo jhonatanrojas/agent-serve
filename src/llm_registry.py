@@ -113,6 +113,84 @@ def list_models(only_available: bool = False) -> list[ModelEntry]:
     return sorted(models, key=lambda m: m.priority)
 
 
+# ---------------------------------------------------------------------------
+# Registry dinámico — modelos agregados en runtime via Telegram
+# ---------------------------------------------------------------------------
+import sqlite3
+
+_DB_PATH = os.getenv("SQLITE_DB_PATH", "/root/agent-serve/.agent.db")
+
+
+def _dyn_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(_DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS llm_dynamic_models (
+            key         TEXT PRIMARY KEY,
+            model       TEXT NOT NULL,
+            api_key_env TEXT,
+            api_key_val TEXT,
+            priority    INTEGER DEFAULT 10,
+            use_cases   TEXT DEFAULT 'general',
+            notes       TEXT
+        )
+    """)
+    conn.commit()
+    return conn
+
+
+def load_dynamic_models():
+    """Carga modelos dinámicos desde SQLite al MODELS_REGISTRY en memoria."""
+    try:
+        with _dyn_conn() as conn:
+            rows = conn.execute(
+                "SELECT key, model, api_key_env, api_key_val, priority, use_cases, notes FROM llm_dynamic_models"
+            ).fetchall()
+        for key, model, api_key_env, api_key_val, priority, use_cases, notes in rows:
+            # Inyectar la API key en el entorno si fue guardada
+            if api_key_env and api_key_val:
+                os.environ.setdefault(api_key_env, api_key_val)
+            MODELS_REGISTRY[key] = ModelEntry(
+                key=key,
+                model=model,
+                priority=priority,
+                supports_tools=True,
+                use_cases=[u.strip() for u in (use_cases or "general").split(",")],
+                notes=notes,
+                enabled=True,
+            )
+    except Exception:
+        pass
+
+
+def register_dynamic_model(key: str, model: str, api_key_env: str, api_key_val: str,
+                            priority: int = 10, use_cases: str = "general",
+                            notes: str = "") -> ModelEntry:
+    """Persiste un modelo nuevo en SQLite y lo agrega al registry en memoria."""
+    if api_key_env and api_key_val:
+        os.environ[api_key_env] = api_key_val
+    with _dyn_conn() as conn:
+        conn.execute("""
+            INSERT INTO llm_dynamic_models (key, model, api_key_env, api_key_val, priority, use_cases, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                model=excluded.model, api_key_env=excluded.api_key_env,
+                api_key_val=excluded.api_key_val, priority=excluded.priority,
+                use_cases=excluded.use_cases, notes=excluded.notes
+        """, (key, model, api_key_env, api_key_val, priority, use_cases, notes))
+        conn.commit()
+    entry = ModelEntry(
+        key=key, model=model, priority=priority, supports_tools=True,
+        use_cases=[u.strip() for u in use_cases.split(",")],
+        notes=notes, enabled=True,
+    )
+    MODELS_REGISTRY[key] = entry
+    return entry
+
+
+# Cargar modelos dinámicos al importar el módulo
+load_dynamic_models()
+
+
 def models_status_text() -> str:
     """Texto legible para el comando /models de Telegram."""
     lines = ["📋 *Modelos disponibles:*\n"]

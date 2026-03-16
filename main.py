@@ -16,7 +16,7 @@ from src.task_source_router import TaskSourceRouter
 from src.task_store import TaskStore
 from src.task_file_manager import TaskFileManager
 from src.tools import git_diff_summary
-from src.llm_registry import models_status_text, get_model
+from src.llm_registry import models_status_text, get_model, register_dynamic_model
 from src.chat_preferences import get_preference, set_auto, set_manual
 from src.llm_runner import stats_text
 from src.work_item import WorkItem
@@ -496,7 +496,156 @@ async def handle_runwith(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.application.create_task(_watch_current_task(update, _current_task))
 
 
+_ONBOARDING_TEXT = """👋 *Bienvenido a Agent Server*
+
+Antes de empezar, configura tu entorno:
+
+*1. Workspace activo*
+```
+/workon repo=<url> branch=<branch>
+```
+Ejemplo: `/workon repo=git@github.com:user/repo.git branch=main`
+
+*2. Modelo LLM*
+El modelo por defecto está configurado en `.env` (`LLM_MODEL`).
+Para ver los modelos disponibles: /models
+Para fijar un modelo: `/model <key>`
+Para agregar un modelo nuevo: `/addmodel`
+
+*3. Fuente de tareas*
+- Solo local: `/taskmode local`
+- Solo Notion: `/taskmode notion` (requiere `NOTION_API_KEY` en `.env`)
+- Ambas: `/taskmode hybrid`
+
+*4. Crear tu primera tarea*
+```
+/addtask Mi primera tarea | descripción opcional
+```
+
+*5. Ejecutar*
+```
+/do_next
+```
+
+Escribe /help para ver todos los comandos disponibles."""
+
+
+_ADDMODEL_USAGE = """➕ *Agregar modelo*
+
+Formato:
+```
+/addmodel key=<key> model=<provider/model> env=<API_KEY_VAR> key_val=<valor> [uses=<roles>] [priority=<n>]
+```
+
+Ejemplos:
+```
+/addmodel key=gpt4 model=openai/gpt-4o env=OPENAI_API_KEY key_val=sk-xxx uses=coder,reviewer priority=3
+/addmodel key=claude model=anthropic/claude-3-5-sonnet env=ANTHROPIC_API_KEY key_val=sk-ant-xxx uses=general priority=4
+```
+
+`uses` acepta: `general`, `coder`, `analyst`, `planner`, `reviewer`, `tests`"""
+
+
+_SETKEY_USAGE = """🔑 *Configurar API key*
+
+Formato:
+```
+/setkey <ENV_VAR> <valor>
+```
+
+Ejemplos:
+```
+/setkey OPENAI_API_KEY sk-xxx
+/setkey GEMINI_API_KEY AIza-xxx
+/setkey MISTRAL_API_KEY xxx
+```
+
+Activa el modelo correspondiente en el registry automáticamente."""
+
+
+async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ALLOWED_USER:
+        return
+    await update.message.reply_text(_ONBOARDING_TEXT, parse_mode="Markdown", **_no_preview_kwargs())
+
+
+async def handle_addmodel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ALLOWED_USER:
+        return
+    if not context.args:
+        await update.message.reply_text(_ADDMODEL_USAGE, parse_mode="Markdown", **_no_preview_kwargs())
+        return
+
+    params = _parse_kv_args(context.args)
+    key = params.get("key", "").strip()
+    model = params.get("model", "").strip()
+    env = params.get("env", "").strip()
+    key_val = params.get("key_val", "").strip()
+    uses = params.get("uses", "general").strip()
+    priority = int(params.get("priority", "10"))
+
+    if not key or not model:
+        await update.message.reply_text("❌ `key` y `model` son obligatorios.\n\n" + _ADDMODEL_USAGE,
+                                        parse_mode="Markdown", **_no_preview_kwargs())
+        return
+
+    entry = register_dynamic_model(key, model, env, key_val, priority, uses)
+    await update.message.reply_text(
+        f"✅ Modelo `{key}` registrado\n"
+        f"• model: `{entry.model}`\n"
+        f"• uses: `{', '.join(entry.use_cases)}`\n"
+        f"• priority: `{entry.priority}`\n"
+        f"• disponible: `{entry.is_available}`",
+        parse_mode="Markdown", **_no_preview_kwargs(),
+    )
+
+
+async def handle_setkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ALLOWED_USER:
+        return
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(_SETKEY_USAGE, parse_mode="Markdown", **_no_preview_kwargs())
+        return
+
+    env_var = context.args[0].strip()
+    value = context.args[1].strip()
+
+    # Solo permitir variables de API key conocidas
+    allowed_envs = {
+        "OPENAI_API_KEY", "GEMINI_API_KEY", "MISTRAL_API_KEY",
+        "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY",
+    }
+    if env_var not in allowed_envs:
+        await update.message.reply_text(
+            f"❌ Variable no permitida. Permitidas: {', '.join(sorted(allowed_envs))}",
+            **_no_preview_kwargs()
+        )
+        return
+
+    import os as _os
+    _os.environ[env_var] = value
+
+    # Recargar registry para reflejar la nueva key
+    from src.llm_registry import load_dynamic_models, MODELS_REGISTRY
+    load_dynamic_models()
+
+    # Ver qué modelos se activaron
+    activated = [m.key for m in MODELS_REGISTRY.values() if m.api_key_env == env_var and m.is_available]
+    msg = f"✅ `{env_var}` configurada en memoria."
+    if activated:
+        msg += f"\nModelos activados: {', '.join(f'`{k}`' for k in activated)}"
+    else:
+        msg += "\n⚠️ Ningún modelo del registry usa esta variable aún. Usa /addmodel para registrar uno."
+    await update.message.reply_text(msg, parse_mode="Markdown", **_no_preview_kwargs())
+
+
+
+
 _HELP_TEXT = """🤖 *Comandos disponibles*
+
+*Inicio*
+/start — onboarding y configuración inicial
+/help — muestra este mensaje
 
 *Workspace*
 /workon repo=<url> branch=<b> [notion=<id>] — configura repo activo
@@ -529,8 +678,8 @@ _HELP_TEXT = """🤖 *Comandos disponibles*
 /model <key> — fija modelo para este chat
 /runwith <key> <tarea> — ejecuta tarea puntual con modelo específico
 /modelstats — métricas de uso por modelo
-
-/help — muestra este mensaje"""
+/addmodel key=<k> model=<p/m> env=<VAR> key\_val=<val> — registra modelo nuevo
+/setkey <ENV\_VAR> <valor> — configura API key en memoria"""
 
 
 async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -542,7 +691,10 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     global _bot_app
     _bot_app = ApplicationBuilder().token(TOKEN).build()
+    _bot_app.add_handler(CommandHandler("start", handle_start))
     _bot_app.add_handler(CommandHandler("help", handle_help))
+    _bot_app.add_handler(CommandHandler("addmodel", handle_addmodel))
+    _bot_app.add_handler(CommandHandler("setkey", handle_setkey))
     _bot_app.add_handler(CommandHandler("workon", handle_workon))
     _bot_app.add_handler(CommandHandler("plan_tasks", handle_plan_tasks))
     _bot_app.add_handler(CommandHandler("addtask", handle_addtask))
