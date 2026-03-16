@@ -387,8 +387,17 @@ def notion_tool(tool_name: str, arguments: dict) -> str:
     return notion_mcp.call_tool(tool_name, arguments)
 
 
+_SERENA_OUTPUT_LIMIT = 3000  # chars máx para tools Serena verbosas
+
 def serena_tool(tool_name: str, arguments: dict) -> str:
-    return serena_mcp.call_tool(tool_name, arguments)
+    # Inyectar límite de output para tools que lo soportan
+    if tool_name in ("list_dir", "find_file", "find_symbol", "search_files_by_name"):
+        arguments = {**arguments, "max_answer_chars": _SERENA_OUTPUT_LIMIT}
+    result = serena_mcp.call_tool(tool_name, arguments)
+    # Truncar igualmente por si acaso
+    if isinstance(result, str) and len(result) > _SERENA_OUTPUT_LIMIT:
+        result = result[:_SERENA_OUTPUT_LIMIT] + "\n...[truncado]"
+    return result
 
 
 def _load_mcp_tools(mcp_client):
