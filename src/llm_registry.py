@@ -42,6 +42,10 @@ class ModelEntry:
             return False
         env = self.api_key_env
         if env and not os.getenv(env):
+            # codex_mini acepta sesión de Codex CLI como alternativa
+            if self.key == "codex_mini":
+                import os as _os
+                return _os.path.exists(_os.path.expanduser("~/.codex/auth.json"))
             return False
         return True
 
@@ -107,7 +111,7 @@ MODELS_REGISTRY: dict[str, ModelEntry] = {
         supports_reasoning=False,
         supports_long_context=False,
         use_cases=["coder", "tests"],
-        enabled=bool(os.getenv("OPENAI_API_KEY")),
+        enabled=True,  # is_available verifica OPENAI_API_KEY o sesión Codex CLI
         notes="OpenAI Codex — optimizado para generación de código",
     ),
 }
