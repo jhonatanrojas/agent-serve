@@ -4,6 +4,7 @@ import json
 import logging
 import threading
 from src.tools import TOOLS, TOOL_MAP
+from src.shell_policy import run_with_policy
 
 log = logging.getLogger("executor")
 
@@ -50,7 +51,10 @@ def execute_tool_call(tc) -> tuple[str, dict, str]:
 
     try:
         log.info("Ejecutando tool: %s args=%s", name, args)
-        result = TOOL_MAP[name](args)
+        if name not in TOOL_MAP:
+            return name, args, f"Tool no registrada: `{name}`"
+
+        result = run_with_policy(name, lambda: TOOL_MAP[name](args))
         log.info("Tool %s OK: %s", name, str(result)[:120])
         return name, args, result
     except Exception as e:

@@ -7,30 +7,111 @@ from src.memory import add_memory, search_memory, get_all_memories
 from src.search import web_search
 from src.database import sql_query, list_tables
 from src.scheduler import schedule_task, list_tasks, remove_task
+from src.git_gate import can_commit, can_push, approve_push, clear_push_approval
+from src.path_sandbox import resolve_repo_path, PathSandboxError
 
 REPO_PATH = os.getenv("REPO_PATH", "/root/agent-serve")
 
 
+def _repo() -> git.Repo:
+    return git.Repo(REPO_PATH)
+
+
 def git_pull() -> str:
     try:
-        repo = git.Repo(REPO_PATH)
+        repo = _repo()
         result = repo.remotes.origin.pull()
         return f"git pull OK: {result[0].commit.hexsha[:7]}"
     except Exception as e:
         return f"git pull error: {e}"
 
 
-def git_push(message: str) -> str:
+def git_create_branch(name: str) -> str:
     try:
-        repo = git.Repo(REPO_PATH)
+        branch = (name or "").strip()
+        if not branch:
+            return "git create branch error: branch vacío"
+        repo = _repo()
+        if repo.is_dirty(untracked_files=True):
+            return "git create branch error: repositorio sucio"
+        if branch in [h.name for h in repo.heads]:
+            repo.heads[branch].checkout()
+            return f"git checkout OK: {branch}"
+        repo.create_head(branch).checkout()
+        return f"git create branch OK: {branch}"
+    except Exception as e:
+        return f"git create branch error: {e}"
+
+
+def git_status() -> str:
+    try:
+        repo = _repo()
+        branch = repo.active_branch.name
+        changed = repo.git.status('--short')
+        return f"Branch: {branch}\n{changed or 'working tree clean'}"
+    except Exception as e:
+        return f"git status error: {e}"
+
+
+def git_diff_summary(max_files: int = 20) -> str:
+    try:
+        repo = _repo()
+        files = repo.git.diff('--name-only').splitlines()[:max_files]
+        if not files:
+            return "Sin cambios en diff"
+        lines = []
+        for f in files:
+            try:
+                stat = repo.git.diff('--numstat', '--', f).strip()
+                lines.append(f"- {f}: {stat or 'sin stat'}")
+            except Exception:
+                lines.append(f"- {f}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"git diff summary error: {e}"
+
+
+def git_commit(message: str) -> str:
+    try:
+        repo = _repo()
+        branch = repo.active_branch.name
+        ok, reason = can_commit(branch)
+        if not ok:
+            return reason
         repo.git.add(A=True)
         if not repo.index.diff("HEAD"):
             return "Nada que commitear"
         repo.index.commit(message)
-        repo.remotes.origin.push()
-        return f"git push OK: {message}"
+        clear_push_approval(branch)
+        return f"git commit OK: {message}"
+    except Exception as e:
+        return f"git commit error: {e}"
+
+
+def git_push_branch(branch: str | None = None) -> str:
+    try:
+        repo = _repo()
+        target = (branch or repo.active_branch.name).strip()
+        ok, reason = can_push(target)
+        if not ok:
+            return reason
+        repo.remotes.origin.push(target)
+        clear_push_approval(target)
+        return f"git push OK: {target}"
     except Exception as e:
         return f"git push error: {e}"
+
+
+def git_approve_push(branch: str) -> str:
+    return approve_push(branch)
+
+
+def git_push(message: str) -> str:
+    # Compatibilidad: conservar tool existente como flujo commit+push con gates.
+    commit_result = git_commit(message)
+    if not commit_result.startswith("git commit OK"):
+        return commit_result
+    return git_push_branch(None)
 
 
 def create_spec(title: str, content: str) -> str:
@@ -47,15 +128,22 @@ def create_spec(title: str, content: str) -> str:
 
 def read_file(path: str) -> str:
     try:
-        return Path(path).read_text()
+        safe_path = resolve_repo_path(path)
+        return safe_path.read_text()
+    except PathSandboxError as e:
+        return f"Error leyendo archivo: {e}"
     except Exception as e:
         return f"Error leyendo archivo: {e}"
 
 
 def write_file(path: str, content: str) -> str:
     try:
-        Path(path).write_text(content)
-        return f"Archivo escrito: {path}"
+        safe_path = resolve_repo_path(path)
+        safe_path.parent.mkdir(parents=True, exist_ok=True)
+        safe_path.write_text(content)
+        return f"Archivo escrito: {safe_path}"
+    except PathSandboxError as e:
+        return f"Error escribiendo archivo: {e}"
     except Exception as e:
         return f"Error escribiendo archivo: {e}"
 
@@ -74,11 +162,79 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "git_push",
-            "description": "Hace git add, commit y push",
+            "description": "Compatibilidad: commit + push (aplica approval gate)",
             "parameters": {
                 "type": "object",
                 "properties": {"message": {"type": "string", "description": "Mensaje del commit"}},
                 "required": ["message"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_create_branch",
+            "description": "Crea o cambia a una branch de trabajo",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_status",
+            "description": "Muestra branch y estado del working tree",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_diff_summary",
+            "description": "Resumen de archivos cambiados en diff",
+            "parameters": {
+                "type": "object",
+                "properties": {"max_files": {"type": "integer", "default": 20}},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_commit",
+            "description": "Realiza git add + commit (bloqueado si validation no OK)",
+            "parameters": {
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+                "required": ["message"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_push_branch",
+            "description": "Hace push de una branch (requiere aprobación explícita)",
+            "parameters": {
+                "type": "object",
+                "properties": {"branch": {"type": "string"}},
+                "required": ["branch"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_approve_push",
+            "description": "Aprueba explícitamente push para una branch",
+            "parameters": {
+                "type": "object",
+                "properties": {"branch": {"type": "string"}},
+                "required": ["branch"],
             },
         },
     },
@@ -169,6 +325,12 @@ TOOLS = TOOLS + _notion_tools + _serena_tools
 TOOL_MAP = {
     "git_pull": lambda args: git_pull(),
     "git_push": lambda args: git_push(args["message"]),
+    "git_create_branch": lambda args: git_create_branch(args["name"]),
+    "git_status": lambda args: git_status(),
+    "git_diff_summary": lambda args: git_diff_summary(args.get("max_files", 20)),
+    "git_commit": lambda args: git_commit(args["message"]),
+    "git_push_branch": lambda args: git_push_branch(args["branch"]),
+    "git_approve_push": lambda args: git_approve_push(args["branch"]),
     "create_spec": lambda args: create_spec(args["title"], args["content"]),
     "read_file": lambda args: read_file(args["path"]),
     "write_file": lambda args: write_file(args["path"], args["content"]),
