@@ -38,7 +38,8 @@ Reglas estrictas:
 
 
 def run_coder(subtask: str, context: str = "", progress_callback=None,
-              mode: str = "auto", manual_model_key: str | None = None) -> dict:
+              mode: str = "auto", manual_model_key: str | None = None,
+              repo_path: str | None = None) -> dict:
     """
     Ejecuta una subtarea de codificación con scope acotado.
     Retorna {"result": str, "modified_files": list, "status": str}
@@ -68,6 +69,7 @@ def run_coder(subtask: str, context: str = "", progress_callback=None,
                 tool_choice="auto",
                 mode=mode,
                 manual_model_key=manual_model_key,
+                repo_path=repo_path,
             )
             msg = llm_result.message
         except Exception as e:

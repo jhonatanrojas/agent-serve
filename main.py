@@ -784,6 +784,32 @@ async def handle_codexkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def handle_codexstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra estado de sesión Codex CLI y si codex_mini está activo como runner."""
+    if update.effective_user.id != ALLOWED_USER:
+        return
+    import subprocess, re, os as _os
+    strip_ansi = lambda t: re.sub(r'\x1B\[[0-9;]*[mK]', '', t)
+
+    session = strip_ansi(
+        subprocess.run(["codex", "login", "status"], capture_output=True, text=True).stdout
+    ).strip()
+
+    auth_path = _os.path.expanduser("~/.codex/auth.json")
+    cli_active = _os.path.exists(auth_path)
+
+    from src.llm_registry import MODELS_REGISTRY
+    from src.chat_preferences import get_preference
+    pref = get_preference(update.effective_chat.id)
+
+    lines = [
+        f"🔐 Sesión Codex CLI: {'✅ ' + session if cli_active else '❌ No autenticado'}",
+        f"🤖 codex_mini runner: {'✅ activo (usa CLI)' if cli_active else '❌ inactivo'}",
+        f"⚙️ Modelo actual del chat: {pref or 'auto'}",
+    ]
+    await update.message.reply_text("\n".join(lines), **_no_preview_kwargs())
+
+
 def main():
     global _bot_app
     _bot_app = ApplicationBuilder().token(TOKEN).build()
@@ -793,6 +819,7 @@ def main():
     _bot_app.add_handler(CommandHandler("setkey", handle_setkey))
     _bot_app.add_handler(CommandHandler("codexlogin", handle_codexlogin))
     _bot_app.add_handler(CommandHandler("codexkey", handle_codexkey))
+    _bot_app.add_handler(CommandHandler("codexstatus", handle_codexstatus))
     _bot_app.add_handler(CommandHandler("workon", handle_workon))
     _bot_app.add_handler(CommandHandler("plan_tasks", handle_plan_tasks))
     _bot_app.add_handler(CommandHandler("addtask", handle_addtask))

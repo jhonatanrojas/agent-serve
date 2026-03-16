@@ -167,7 +167,8 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
 
                 effective_context = context + f"\n\nRecovery strategy: {strategy_used}"
                 result = run_coder(subtask, context=effective_context, progress_callback=progress_callback,
-                                   mode=mode, manual_model_key=manual_model_key)
+                                   mode=mode, manual_model_key=manual_model_key,
+                                   repo_path=workspace.get("repo_path"))
                 state.modified_files.extend(result.get("modified_files", []))
                 append_modified_files(run_id, result.get("modified_files", []))
                 status = result.get("status", "unknown")

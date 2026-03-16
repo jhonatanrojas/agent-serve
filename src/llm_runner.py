@@ -92,6 +92,7 @@ def run_llm(
     tool_choice: str = "auto",
     mode: str = "auto",
     manual_model_key: str | None = None,
+    repo_path: str | None = None,
 ) -> LLMResult:
     """
     Ejecuta la llamada LLM con fallback automático.
@@ -108,6 +109,41 @@ def run_llm(
 
     if not candidates:
         raise LLMError("No hay modelos disponibles para esta tarea.", attempts=[])
+
+    # --- Codex CLI runner (coder/tests con sesión activa) ---
+    _CODEX_ROLES = ("coder", "tests")
+    if agent_role in _CODEX_ROLES and repo_path:
+        from src.codex_runner import is_codex_session_active, run_codex_task
+        if is_codex_session_active():
+            prompt = next(
+                (m["content"] for m in reversed(messages) if m.get("role") == "user"),
+                None,
+            )
+            if prompt:
+                _stats["codex_cli"]["calls"] += 1
+                try:
+                    log.info(f"[llm_runner] codex_cli role={agent_role} repo={repo_path}")
+                    output = run_codex_task(prompt, repo_path)
+                    _stats["codex_cli"]["success"] += 1
+
+                    # Construir un message-like compatible con el resto del sistema
+                    class _Msg:
+                        def __init__(self, content):
+                            self.content = content
+                            self.tool_calls = None
+                            self.role = "assistant"
+
+                    return LLMResult(
+                        message=_Msg(output),
+                        model_used="codex_cli",
+                        model_str="codex/codex-mini-latest",
+                        mode=mode,
+                        attempts=[{"model_key": "codex_cli", "status": "ok"}],
+                    )
+                except Exception as e:
+                    _stats["codex_cli"]["failures"] += 1
+                    log.warning(f"[llm_runner] codex_cli falló, fallback a LiteLLM: {e}")
+                    # Continúa con el loop normal de candidatos
 
     attempts: list[dict] = []
 
