@@ -36,7 +36,11 @@ Ejemplos:
 - "sí, ejecuta" → {"intent":"confirm","repo":null,"branch":null,"tasks":[]}
 - "continúa con la tarea pendiente" → {"intent":"do_next","repo":null,"branch":null,"tasks":[]}
 - "sigue con lo que falta" → {"intent":"do_next","repo":null,"branch":null,"tasks":[]}
-- "¿cuál es el estado?" → {"intent":"query","repo":null,"branch":null,"tasks":[]}"""
+- "ejecutar git status y verificar los cambios" → {"intent":"query","repo":null,"branch":null,"tasks":[]}
+- "ver el estado del repo" → {"intent":"query","repo":null,"branch":null,"tasks":[]}
+- "¿cuál es el estado?" → {"intent":"query","repo":null,"branch":null,"tasks":[]}
+
+IMPORTANTE: Si el mensaje es una instrucción de verificación, consulta de estado, o comando git de solo lectura (git status, git diff, git log), clasifícalo como "query", NO como "add_tasks"."""
 
 
 def classify_intent(message: str) -> dict:

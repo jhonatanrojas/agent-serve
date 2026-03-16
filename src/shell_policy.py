@@ -11,6 +11,7 @@ _default_allow = {
     "add_memory", "search_memory", "get_all_memories",
     "web_search", "sql_query", "list_tables",
     "schedule_task", "list_tasks", "remove_task",
+    "list_dir", "find_file", "find_symbol",
 }
 
 

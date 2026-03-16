@@ -41,9 +41,30 @@ def execute_tool_call(tc) -> tuple[str, dict, str]:
         log.error("JSON inválido en tool %s: %s", name, e)
         return name, {}, f"Error: argumentos JSON inválidos en `{name}`"
 
+def execute_tool_call(tc) -> tuple[str, dict, str]:
+    """Ejecuta una tool call. Retorna (name, args, result). Nunca lanza excepción."""
+    name = tc.function.name
+    try:
+        args = json.loads(tc.function.arguments)
+    except json.JSONDecodeError as e:
+        log.error("JSON inválido en tool %s: %s", name, e)
+        return name, {}, f"Error: argumentos JSON inválidos en `{name}`"
+
+    # Normalizar alias comunes de argumentos
+    _ARG_ALIASES = {"relative_path": "path", "file_path": "path", "filename": "path"}
     tool_def = next((t for t in TOOLS if t["function"]["name"] == name), None)
     if tool_def:
         required = tool_def["function"].get("parameters", {}).get("required", [])
+        for req in required:
+            if req not in args:
+                # buscar alias
+                for alias, canonical in _ARG_ALIASES.items():
+                    if req == alias and canonical in args:
+                        args[req] = args[canonical]
+                        break
+                    if req == canonical and alias in args:
+                        args[req] = args[alias]
+                        break
         missing = [r for r in required if r not in args]
         if missing:
             log.warning("Args faltantes en %s: %s", name, missing)
