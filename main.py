@@ -791,21 +791,21 @@ async def handle_codexstatus(update: Update, context: ContextTypes.DEFAULT_TYPE)
     import subprocess, re, os as _os
     strip_ansi = lambda t: re.sub(r'\x1B\[[0-9;]*[mK]', '', t)
 
-    session = strip_ansi(
-        subprocess.run(["codex", "login", "status"], capture_output=True, text=True).stdout
-    ).strip()
-
     auth_path = _os.path.expanduser("~/.codex/auth.json")
     cli_active = _os.path.exists(auth_path)
 
-    from src.llm_registry import MODELS_REGISTRY
+    session = strip_ansi(
+        subprocess.run(["codex", "login", "status"], capture_output=True, text=True).stdout
+    ).strip() or ("Logged in" if cli_active else "Not logged in")
+
     from src.chat_preferences import get_preference
     pref = get_preference(update.effective_chat.id)
+    mode_str = pref["mode"] if pref["model_key"] is None else f"manual → {pref['model_key']}"
 
     lines = [
-        f"🔐 Sesión Codex CLI: {'✅ ' + session if cli_active else '❌ No autenticado'}",
+        f"🔐 Sesión Codex CLI: {'✅ ' + session if cli_active else '❌ ' + session}",
         f"🤖 codex_mini runner: {'✅ activo (usa CLI)' if cli_active else '❌ inactivo'}",
-        f"⚙️ Modelo actual del chat: {pref or 'auto'}",
+        f"⚙️ Modelo actual del chat: {mode_str}",
     ]
     await update.message.reply_text("\n".join(lines), **_no_preview_kwargs())
 
