@@ -137,7 +137,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             approve_push(branch)
             push_result = git_push_branch(branch)
             if "error" in push_result.lower():
-                return push_result, None
+                return push_result, {"error": push_result, "head": branch}
             # Crear PR
             pr = create_github_pr(
                 title=f"[{task.id}] {task.title}",
@@ -145,13 +145,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 head=branch,
                 base="main",
             )
+            pr["head"] = branch
             return push_result, pr
 
         push_res, pr = await loop.run_in_executor(None, _push_and_pr)
         if pr and "url" in pr:
             await notify(f"🔀 PR creado: {pr['url']}")
         elif pr and "error" in pr:
-            await notify(f"⚠️ Push OK pero PR falló: {pr['error']}")
+            if "GITHUB_TOKEN no configurado" in pr["error"]:
+                from src.intent_handler import request_github_token
+                pr_data = {
+                    "title": f"[{task.id}] {task.title}",
+                    "body": f"## Resumen\n\n{result[:2000] if result else 'Tarea completada.'}\n\n---\n_PR generado automáticamente por agent-serve_",
+                    "head": pr.get("head", ""),
+                    "base": "main",
+                }
+                request_github_token(chat_id, pr_data)
+                await notify("🔑 Para crear el PR necesito tu GitHub token.\nEnvíalo ahora (Personal Access Token con permisos `repo`):")
+            else:
+                await notify(f"⚠️ Push OK pero PR falló: {pr['error']}")
 
     # --- Intentar flujo de lenguaje natural ---
     from src.intent_handler import handle_natural_message

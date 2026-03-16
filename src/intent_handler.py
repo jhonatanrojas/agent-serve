@@ -30,6 +30,14 @@ def clear_pending(chat_id: int):
     _chat_state.pop(chat_id, None)
 
 
+def request_github_token(chat_id: int, pr_data: dict | None = None):
+    """Marca el estado para que el próximo mensaje del usuario sea interpretado como GITHUB_TOKEN."""
+    state = get_chat_state(chat_id)
+    state["pending_github_token"] = True
+    if pr_data:
+        state["pending_pr"] = pr_data
+
+
 async def handle_natural_message(
     chat_id: int,
     user_id: int,
@@ -42,6 +50,38 @@ async def handle_natural_message(
     seguir el flujo normal de run_agent().
     """
     state = get_chat_state(chat_id)
+
+    # --- Token pendiente: el usuario está respondiendo con el GITHUB_TOKEN ---
+    if state.get("pending_github_token"):
+        token = message.strip()
+        if token and not token.startswith("/"):
+            import re
+            from pathlib import Path
+            os.environ["GITHUB_TOKEN"] = token
+            env_path = Path(__file__).parent.parent / ".env"
+            if env_path.exists():
+                text = env_path.read_text()
+                if "GITHUB_TOKEN=" in text:
+                    text = re.sub(r"GITHUB_TOKEN=.*", f"GITHUB_TOKEN={token}", text)
+                else:
+                    text += f"\nGITHUB_TOKEN={token}\n"
+                env_path.write_text(text)
+            state.pop("pending_github_token")
+            await notify("✅ GitHub token registrado. Reintentando el PR...")
+            # Reintentar PR si hay datos pendientes
+            if state.get("pending_pr"):
+                pr_data = state.pop("pending_pr")
+                from src.tools import create_github_pr
+                pr = create_github_pr(**pr_data)
+                if "url" in pr:
+                    await notify(f"🔀 PR creado: {pr['url']}")
+                else:
+                    await notify(f"⚠️ PR falló: {pr.get('error')}")
+            return True
+        else:
+            state.pop("pending_github_token", None)
+            await notify("❌ Token inválido, operación cancelada.")
+            return True
 
     # --- Confirmación pendiente ---
     if state.get("pending_tasks"):
