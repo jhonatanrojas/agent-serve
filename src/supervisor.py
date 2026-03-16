@@ -51,9 +51,21 @@ def _parse_subtask_index(next_action: str) -> int:
         return 1
 
 
+
+
+def _is_analysis_subtask(text: str) -> bool:
+    t = (text or "").strip().lower()
+    analysis_signals = ("analizar", "investigar", "revisar", "documentar", "diagnosticar", "explorar")
+    implementation_signals = ("implementar", "cambiar", "modificar", "crear", "agregar", "fix", "corregir", "actualizar")
+    if any(sig in t for sig in implementation_signals):
+        return False
+    return any(sig in t for sig in analysis_signals)
+
+
 def run_supervisor(user_message: str, progress_callback=None, existing_run_id: str | None = None,
                    completed_subtasks: set[str] | None = None,
-                   mode: str = "auto", manual_model_key: str | None = None) -> str:
+                   mode: str = "auto", manual_model_key: str | None = None,
+                   task_id: str | None = None) -> str:
     state = SupervisorState(message=user_message)
     completed_subtasks = completed_subtasks or set()
     recovery = RecoveryAgent()
@@ -78,12 +90,12 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
         model_label = candidates[0].key if candidates else "?"
         notify(f"🤖 [{agent}/{model_label}] {msg}")
 
-    run_id = existing_run_id or create_run_state(initial_phase="planning", source_message=user_message)
+    run_id = existing_run_id or create_run_state(initial_phase="planning", source_message=user_message, task_id=task_id)
 
     try:
         from src.workspace_context import get_active_repo_path
         active_repo = get_active_repo_path()
-        workspace = WorkspaceManager(repo_path=active_repo).create_or_get_workspace(run_id, user_message)
+        workspace = WorkspaceManager(repo_path=active_repo).create_or_get_workspace(run_id, user_message, task_id=task_id)
         mark_validation_result(False, workspace["branch_name"])
         append_checkpoint(run_id, "workspace_ready", "planning", workspace)
         notify(f"🌿 Workspace listo en branch `{workspace['branch_name']}`")
@@ -148,6 +160,19 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
         append_checkpoint(run_id, "done_no_subtasks", "done", {})
         return "__SIMPLE__"
 
+    coding_subtasks = [s for s in subtasks if not _is_analysis_subtask(s)]
+    skipped_analysis = [s for s in subtasks if _is_analysis_subtask(s)]
+    if skipped_analysis:
+        append_checkpoint(run_id, "analysis_subtasks_skipped", "coding", {"count": len(skipped_analysis), "subtasks": skipped_analysis[:10]})
+        notify(f"ℹ️ Subtareas de análisis derivadas al analyst (omitidas en coder): {len(skipped_analysis)}")
+
+    if not coding_subtasks:
+        notify("⚠️ Solo había subtareas de análisis. Nada para implementar en coder.")
+        state.stage = "done"
+        update_run_state(run_id, phase="done", next_action="done")
+        append_checkpoint(run_id, "done_analysis_only", "done", {"subtasks": skipped_analysis[:10]})
+        return "__SIMPLE__"
+
     start_index = _parse_subtask_index(next_action) if next_action.startswith("code_subtask_") else 1
     context = f"Spec:\n{state.spec_summary}\n\nAnálisis:\n{state.analysis}"
 
@@ -169,7 +194,7 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
             pass
 
     if next_action in ("planning", "analyze") or next_action.startswith("code_subtask_"):
-        for i, subtask in enumerate(subtasks, 1):
+        for i, subtask in enumerate(coding_subtasks, 1):
             if i < start_index or subtask in completed_subtasks:
                 append_checkpoint(run_id, "subtask_skipped_resume", "coding", {"subtask": subtask, "index": i})
                 continue
@@ -188,9 +213,9 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
             strategy_used = "default"
             while True:
                 attempt_count += 1
-                notify_agent("coder", f"Subtarea {i}/{len(subtasks)} intento {attempt_count}:\n`{subtask}`")
+                notify_agent("coder", f"Subtarea {i}/{len(coding_subtasks)} intento {attempt_count}:\n`{subtask}`")
                 update_run_state(run_id, current_subtask=subtask, current_subtask_index=i, next_action=f"code_subtask_{i}")
-                append_checkpoint(run_id, "subtask_started", "coding", {"subtask": subtask, "index": i, "total": len(subtasks), "attempt": attempt_count})
+                append_checkpoint(run_id, "subtask_started", "coding", {"subtask": subtask, "index": i, "total": len(coding_subtasks), "attempt": attempt_count})
 
                 effective_context = context + f"\n\nRecovery strategy: {strategy_used}"
                 result = run_coder(subtask, context=effective_context, progress_callback=progress_callback,
@@ -212,7 +237,7 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
                     update_run_state(
                         run_id,
                         completed_subtasks=sorted(completed_subtasks),
-                        next_action=f"code_subtask_{i + 1}" if i < len(subtasks) else "review",
+                        next_action=f"code_subtask_{i + 1}" if i < len(coding_subtasks) else "review",
                     )
                     break
 
@@ -278,7 +303,7 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
         "🏁 **Tarea completada**",
         f"• Run ID: {run_id}",
         f"• Branch: {workspace.get('branch_name', 'n/a')}",
-        f"• Subtareas ejecutadas: {len(subtasks)}",
+        f"• Subtareas ejecutadas: {len(coding_subtasks)}",
         f"• Archivos modificados: {state.modified_files or 'ninguno'}",
         f"• Review: {verdict}",
         f"• Validación: {'✅ OK' if validation.get('passed') else '⚠️ Con errores'}",

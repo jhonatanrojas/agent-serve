@@ -34,9 +34,28 @@ Subtarea a implementar:
 Reglas estrictas:
 - Implementa SOLO lo que dice la subtarea, nada más.
 - No refactorices código fuera del alcance.
+- NO entregues solo análisis o explicación: debes aplicar cambios reales en archivos cuando la subtarea sea de implementación.
+- Si la subtarea es solo "analizar", "investigar" o "documentar" sin pedir cambios de código, responde con "NECESITA_IMPLEMENTACION_EXPLICITA" y no finalices como completada.
+- Para cambiar código usa herramientas de edición (write_file/replace_content/replace_symbol_body/etc.).
 - Reporta cada archivo que modifiques.
 - Si algo es ambiguo, elige la opción más conservadora.
 - Responde en español."""
+
+
+def _has_code_changes(repo_path: str | None) -> bool:
+    if not repo_path:
+        return bool(False)
+    try:
+        import subprocess
+        changed_files = [
+            p.strip() for p in subprocess.check_output(["git", "diff", "--name-only", "HEAD"], cwd=repo_path, text=True).splitlines()
+            if p.strip()
+        ]
+    except Exception:
+        return False
+
+    code_exts = (".py", ".js", ".ts", ".tsx", ".jsx", ".html", ".css", ".scss", ".json", ".yml", ".yaml", ".toml", ".sh")
+    return any((f.startswith("src/") or f == "main.py" or f.endswith(code_exts)) and not f.endswith(".md") for f in changed_files)
 
 
 def run_coder(subtask: str, context: str = "", progress_callback=None,
@@ -79,7 +98,7 @@ def run_coder(subtask: str, context: str = "", progress_callback=None,
                 tools=_CODER_TOOLS,
                 tool_choice="auto",
                 mode=mode,
-                manual_model_key=manual_model_key,
+                manual_model_key=None if manual_model_key == "codex_mini" else manual_model_key,
                 repo_path=repo_path,
             )
             msg = llm_result.message
@@ -93,6 +112,21 @@ def run_coder(subtask: str, context: str = "", progress_callback=None,
         messages.append(msg.model_dump(exclude_none=True))
 
         if not msg.tool_calls:
+            content = (msg.content or "").strip()
+            if "NECESITA_IMPLEMENTACION_EXPLICITA" in content:
+                ctx.finish("error", "Subtarea sin instrucción de implementación")
+                return {
+                    "result": "Subtarea solo de análisis/documentación sin instrucción de implementar código.",
+                    "modified_files": ctx.modified_files,
+                    "status": "error",
+                }
+            if not _has_code_changes(repo_path):
+                retry_msg = "No detecté cambios de código en git diff --stat. Debes modificar archivos de código, no solo analizar."
+                messages.append({"role": "user", "content": retry_msg})
+                if progress_callback:
+                    progress_callback("⚠️ Coder sin cambios de código detectados; reintentando con instrucción explícita.")
+                continue
+
             ctx.finish("completed")
             log.info("Coder completó subtarea en %d iteraciones", iteration + 1)
             return {
