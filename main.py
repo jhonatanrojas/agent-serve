@@ -95,12 +95,47 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if _current_task and not _current_task.done():
         await update.message.reply_text("⏳ Ya hay una tarea en ejecución. Usa /stop para cancelarla.", **_no_preview_kwargs())
         return
+
     ws = _set_workspace_context(update.effective_chat.id)
     user_text = update.message.text
     pref = get_preference(update.effective_chat.id)
-    await update.message.reply_text(f"🤖 Procesando en `{ws['repo_path']}`...", **_no_preview_kwargs())
-
+    chat_id = update.effective_chat.id
     loop = asyncio.get_event_loop()
+
+    async def notify(msg):
+        await update.message.reply_text(msg, **_no_preview_kwargs())
+
+    async def run_task_by_id(task_id: str):
+        from src.task_store import TaskStore
+        from src.task_source_router import TaskSourceRouter
+        ws_now = _set_workspace_context(chat_id)
+        router = TaskSourceRouter(ws_now)
+        tasks = router.list_tasks()
+        task = next((t for t in tasks if t.id.startswith(task_id) or t.id == task_id), None)
+        if not task:
+            await notify(f"⚠️ Tarea {task_id} no encontrada.")
+            return
+        await notify(f"🚀 Ejecutando `{task.id[:8]}`: {task.title}")
+        def run_sync():
+            return run_supervisor(f"{task.title}\n\n{task.description or ''}",
+                                  mode=pref["mode"], manual_model_key=pref["model_key"])
+        result = await loop.run_in_executor(None, run_sync)
+        await notify(result[:1000] if result else "✅ Tarea completada.")
+
+    # --- Intentar flujo de lenguaje natural ---
+    from src.intent_handler import handle_natural_message
+    handled = await handle_natural_message(
+        chat_id=chat_id,
+        user_id=update.effective_user.id,
+        message=user_text,
+        notify=notify,
+        run_task_fn=run_task_by_id,
+    )
+    if handled:
+        return
+
+    # --- Flujo normal: run_agent ---
+    await update.message.reply_text(f"🤖 Procesando en `{ws['repo_path']}`...", **_no_preview_kwargs())
 
     async def progress(msg):
         await update.message.reply_text(msg, **_no_preview_kwargs())
