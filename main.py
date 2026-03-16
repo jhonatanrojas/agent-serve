@@ -13,6 +13,7 @@ from src.run_dashboard import build_run_dashboard, build_run_logs, build_run_pla
 from src.tools import git_diff_summary
 from src.llm_registry import models_status_text, get_model
 from src.chat_preferences import get_preference, set_auto, set_manual
+from src.llm_runner import stats_text
 
 load_dotenv()
 
@@ -176,6 +177,12 @@ async def handle_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.application.create_task(_watch_current_task(update, _current_task))
 
 
+async def handle_modelstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ALLOWED_USER:
+        return
+    await update.message.reply_text(stats_text(), parse_mode="Markdown", **_no_preview_kwargs())
+
+
 async def handle_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ALLOWED_USER:
         return
@@ -272,6 +279,7 @@ def main():
     _bot_app.add_handler(CommandHandler("models", handle_models))
     _bot_app.add_handler(CommandHandler("model", handle_model))
     _bot_app.add_handler(CommandHandler("runwith", handle_runwith))
+    _bot_app.add_handler(CommandHandler("modelstats", handle_modelstats))
     _bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     async def send_scheduled(msg: str):

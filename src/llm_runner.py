@@ -5,6 +5,7 @@ Ejecuta llamadas a LiteLLM probando candidatos en orden hasta que uno responda.
 from __future__ import annotations
 import logging
 import litellm
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -12,6 +13,29 @@ from src.llm_registry import ModelEntry
 from src.llm_selector import select_candidates
 
 log = logging.getLogger("llm_runner")
+
+# ---------------------------------------------------------------------------
+# Métricas en memoria (se resetean al reiniciar el servicio)
+# ---------------------------------------------------------------------------
+_stats: dict[str, dict] = defaultdict(lambda: {
+    "calls": 0, "success": 0, "failures": 0, "fallbacks_triggered": 0
+})
+
+
+def get_stats() -> dict[str, dict]:
+    return dict(_stats)
+
+
+def stats_text() -> str:
+    if not _stats:
+        return "📊 Sin métricas aún."
+    lines = ["📊 *LLM Stats (sesión actual):*\n"]
+    for key, s in sorted(_stats.items()):
+        lines.append(
+            f"• `{key}`: ✅{s['success']} ❌{s['failures']} "
+            f"🔁fallbacks={s['fallbacks_triggered']} calls={s['calls']}"
+        )
+    return "\n".join(lines)
 
 # Errores que justifican fallback al siguiente modelo
 _FALLBACK_EXCEPTIONS = (
@@ -89,22 +113,28 @@ def run_llm(
 
     for entry in candidates:
         attempt: dict = {"model_key": entry.key, "model_str": entry.model}
+        _stats[entry.key]["calls"] += 1
         try:
             kwargs: dict = {"model": entry.model, "messages": messages}
             if tools and entry.supports_tools:
                 kwargs["tools"] = tools
                 kwargs["tool_choice"] = tool_choice
 
-            log.info(f"[llm_runner] Intentando modelo={entry.key} role={agent_role or task_type} mode={mode}")
+            log.info(f"[llm_runner] model={entry.key} role={agent_role or task_type} mode={mode}")
             response = litellm.completion(**kwargs)
             message = response.choices[0].message
 
             attempt["status"] = "ok"
             attempts.append(attempt)
+            _stats[entry.key]["success"] += 1
 
             if len(attempts) > 1:
-                log.info(f"[llm_runner] Fallback exitoso en modelo={entry.key} tras {len(attempts)-1} fallo(s)")
+                _stats[entry.key]["fallbacks_triggered"] += 1
+                log.info(f"[llm_runner] Fallback exitoso model={entry.key} tras {len(attempts)-1} fallo(s)")
 
+            log.info(
+                f"[llm_runner] OK model={entry.key} fallbacks={len(attempts)-1} mode={mode}"
+            )
             return LLMResult(
                 message=message,
                 model_used=entry.key,
@@ -119,14 +149,16 @@ def run_llm(
             attempt["error_type"] = error_type
             attempt["error"] = str(e)[:200]
             attempts.append(attempt)
-            log.warning(f"[llm_runner] Fallo modelo={entry.key} error={error_type}: {str(e)[:100]}")
+            _stats[entry.key]["failures"] += 1
+            log.warning(f"[llm_runner] FAIL model={entry.key} error={error_type}: {str(e)[:100]}")
 
         except Exception as e:
             attempt["status"] = "failed"
             attempt["error_type"] = "unexpected"
             attempt["error"] = str(e)[:200]
             attempts.append(attempt)
-            log.error(f"[llm_runner] Error inesperado modelo={entry.key}: {e}")
+            _stats[entry.key]["failures"] += 1
+            log.error(f"[llm_runner] ERROR model={entry.key}: {e}")
 
     raise LLMError(
         f"Todos los modelos fallaron ({len(attempts)} intento(s)).",
