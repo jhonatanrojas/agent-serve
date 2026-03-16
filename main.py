@@ -697,29 +697,36 @@ async def handle_codexlogin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("🔐 Iniciando device flow de Codex CLI...", **_no_preview_kwargs())
 
-    import subprocess, threading
+    import subprocess, threading, re
 
-    output_lines = []
+    def strip_ansi(text):
+        return re.sub(r'\x1B\[[0-9;]*[mK]', '', text)
+
     proc = subprocess.Popen(
         ["codex", "login", "--device-auth"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1,
     )
 
+    output_lines = []
     for line in proc.stdout:
-        output_lines.append(line.strip())
-        if len(output_lines) >= 10:
+        clean = strip_ansi(line).strip()
+        if clean:
+            output_lines.append(clean)
+        if len(output_lines) >= 12:
             break
 
-    msg = "🔐 *Codex Device Login*\n\n"
+    msg = "🔐 Codex Device Login\n\n"
     msg += "\n".join(output_lines) if output_lines else "Sin output del CLI."
-    msg += "\n\n_Abre la URL en tu navegador, ingresa el código y autoriza._"
+    msg += "\n\nAbre la URL en tu navegador, ingresa el código y autoriza."
 
-    await update.message.reply_text(msg, parse_mode="Markdown", **_no_preview_kwargs())
+    await update.message.reply_text(msg, **_no_preview_kwargs())
 
     def wait_and_notify():
         proc.wait()
-        status = subprocess.run(["codex", "login", "status"], capture_output=True, text=True).stdout.strip()
+        status = strip_ansi(
+            subprocess.run(["codex", "login", "status"], capture_output=True, text=True).stdout
+        ).strip()
         asyncio.run_coroutine_threadsafe(
             update.message.reply_text(f"✅ Codex login: {status}", **_no_preview_kwargs()),
             asyncio.get_event_loop(),
