@@ -2,17 +2,20 @@ import os
 import subprocess
 import logging
 from pathlib import Path
+from src.workspace_context import get_active_repo_path
 
-REPO_PATH = Path(os.getenv("REPO_PATH", "/root/agent-serve"))
-VENV_BIN = REPO_PATH / "venv" / "bin"
 log = logging.getLogger("validator")
+
+
+def _venv_bin():
+    return get_active_repo_path() / "venv" / "bin"
 
 
 def _run(cmd: list, cwd=None, timeout: int = 30) -> tuple[int, str]:
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True,
-            cwd=str(cwd or REPO_PATH), timeout=timeout
+            cwd=str(cwd or get_active_repo_path()), timeout=timeout
         )
         output = (result.stdout + result.stderr).strip()
         return result.returncode, output
@@ -28,8 +31,8 @@ def run_lint(files: list[str]) -> dict:
     if not py_files:
         return {"tool": "lint", "passed": True, "output": "Sin archivos Python que revisar"}
 
-    ruff = str(VENV_BIN / "ruff")
-    flake8 = str(VENV_BIN / "flake8")
+    ruff = str(_venv_bin() / "ruff")
+    flake8 = str(_venv_bin() / "flake8")
 
     for tool, cmd in [
         ("ruff", [ruff, "check", "--select=E,F,W"] + py_files),
@@ -50,8 +53,8 @@ def run_type_check(files: list[str]) -> dict:
     if not py_files:
         return {"tool": "typecheck", "passed": True, "output": "Sin archivos Python"}
 
-    pyright = str(VENV_BIN / "pyright")
-    mypy = str(VENV_BIN / "mypy")
+    pyright = str(_venv_bin() / "pyright")
+    mypy = str(_venv_bin() / "mypy")
 
     for tool, cmd in [
         ("pyright", [pyright] + py_files),
@@ -73,7 +76,7 @@ def run_syntax_check(files: list[str]) -> dict:
     for f in files:
         if not f.endswith(".py"):
             continue
-        path = REPO_PATH / f if not f.startswith("/") else Path(f)
+        path = get_active_repo_path() / f if not f.startswith("/") else Path(f)
         try:
             py_compile.compile(str(path), doraise=True)
         except py_compile.PyCompileError as e:
@@ -90,7 +93,7 @@ def run_syntax_check(files: list[str]) -> dict:
 
 def _discover_related_tests(modified_files: list[str]) -> list[str]:
     """Mapea archivos modificados a tests cercanos: tests/**/test_<stem>.py o *test*.py relacionados."""
-    tests_root = REPO_PATH / "tests"
+    tests_root = get_active_repo_path() / "tests"
     if not tests_root.exists():
         return []
 
@@ -102,7 +105,7 @@ def _discover_related_tests(modified_files: list[str]) -> list[str]:
         parent_parts = [part for part in p.parts if part not in {"src", "app"}]
 
         for t in all_tests:
-            t_rel = t.relative_to(REPO_PATH)
+            t_rel = t.relative_to(get_active_repo_path())
             t_str = str(t_rel)
             if stem and (f"test_{stem}.py" in t_str or stem in t_str):
                 candidates.add(t_str)
@@ -125,7 +128,7 @@ def run_related_tests(modified_files: list[str]) -> dict:
             "related_tests": [],
         }
 
-    pytest_bin = str(VENV_BIN / "pytest")
+    pytest_bin = str(_venv_bin() / "pytest")
     cmd = [pytest_bin, "-q", *related_tests]
     code, output = _run(cmd, timeout=90)
 

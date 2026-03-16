@@ -8,6 +8,7 @@ import git
 
 DB_PATH = os.getenv("RUNSTATE_DB_PATH", os.getenv("SQLITE_DB_PATH", "/root/agent-serve/.agent.db"))
 REPO_PATH = Path(os.getenv("REPO_PATH", "/root/agent-serve")).resolve()
+WORKSPACE_ROOT = Path(os.getenv("WORKSPACE_ROOT", "/tmp/agent-workspaces")).resolve()
 
 
 class WorkspaceError(Exception):
@@ -33,6 +34,19 @@ def _conn() -> sqlite3.Connection:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS workspace_sessions (
+            chat_id TEXT PRIMARY KEY,
+            repo_url TEXT,
+            notion_database_id TEXT,
+            repo_path TEXT NOT NULL,
+            active_branch TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
     return conn
 
@@ -42,20 +56,117 @@ def _slug(text: str) -> str:
     return cleaned[:40] or "task"
 
 
-def _validate_workspace_path(path: Path, root: Path):
-    resolved = path.resolve()
-    allowed_root = root.resolve()
-    if not str(resolved).startswith(str(allowed_root)):
-        raise WorkspaceError(f"Ruta de workspace inválida: {resolved}")
+def _safe_repo_dir(repo_url: str) -> str:
+    base = repo_url.rstrip("/").split("/")[-1].replace(".git", "")
+    return _slug(base) or "repo"
+
+
+def _validate_no_main(branch: str):
+    if (branch or "").strip() in {"main", "master"}:
+        raise WorkspaceError("No se permite trabajar directamente sobre main/master.")
 
 
 class WorkspaceManager:
     def __init__(self, repo_path: Path | None = None):
-        configured_root = REPO_PATH.resolve()
-        self.repo_path = (repo_path or configured_root).resolve()
-        root = self.repo_path if repo_path is not None else configured_root
-        _validate_workspace_path(self.repo_path, root)
+        self.repo_path = (repo_path or REPO_PATH).resolve()
 
+    def get_active_workspace(self, chat_id: str | int | None = None) -> dict:
+        chat_key = str(chat_id or "legacy")
+        with _conn() as conn:
+            row = conn.execute(
+                """
+                SELECT chat_id, repo_url, notion_database_id, repo_path, active_branch, created_at, updated_at
+                FROM workspace_sessions WHERE chat_id=?
+                """,
+                (chat_key,),
+            ).fetchone()
+        if row:
+            return {
+                "chat_id": row[0],
+                "repo_url": row[1] or "",
+                "notion_database_id": row[2] or "",
+                "repo_path": row[3],
+                "active_branch": row[4],
+                "created_at": row[5],
+                "updated_at": row[6],
+            }
+        # fallback legacy
+        return {
+            "chat_id": chat_key,
+            "repo_url": "",
+            "notion_database_id": "",
+            "repo_path": str(self.repo_path),
+            "active_branch": self._current_branch(self.repo_path),
+            "created_at": _now(),
+            "updated_at": _now(),
+        }
+
+    def set_active_workspace(self, chat_id: str | int, repo_url: str, notion_database_id: str, branch: str) -> dict:
+        _validate_no_main(branch)
+        repo_url = (repo_url or "").strip()
+        if not repo_url:
+            raise WorkspaceError("repo_url es obligatorio")
+
+        WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+        repo_dir = WORKSPACE_ROOT / _safe_repo_dir(repo_url)
+        if (repo_dir / ".git").exists():
+            repo = git.Repo(str(repo_dir))
+            repo.remotes.origin.fetch()
+        else:
+            repo = git.Repo.clone_from(repo_url, str(repo_dir))
+
+        self._checkout_branch(repo, branch)
+
+        chat_key = str(chat_id)
+        ts = _now()
+        with _conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO workspace_sessions(chat_id, repo_url, notion_database_id, repo_path, active_branch, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    repo_url=excluded.repo_url,
+                    notion_database_id=excluded.notion_database_id,
+                    repo_path=excluded.repo_path,
+                    active_branch=excluded.active_branch,
+                    updated_at=excluded.updated_at
+                """,
+                (chat_key, repo_url, notion_database_id, str(repo_dir), branch, ts, ts),
+            )
+            conn.commit()
+        return self.get_active_workspace(chat_key)
+
+    def set_active_branch(self, chat_id: str | int, branch: str) -> dict:
+        _validate_no_main(branch)
+        ws = self.get_active_workspace(chat_id)
+        repo = git.Repo(ws["repo_path"])
+        self._checkout_branch(repo, branch)
+        with _conn() as conn:
+            conn.execute(
+                "UPDATE workspace_sessions SET active_branch=?, updated_at=? WHERE chat_id=?",
+                (branch, _now(), str(chat_id)),
+            )
+            conn.commit()
+        return self.get_active_workspace(chat_id)
+
+    def _checkout_branch(self, repo: git.Repo, branch: str):
+        if branch in [h.name for h in repo.heads]:
+            repo.heads[branch].checkout()
+            return
+        origin_branch = f"origin/{branch}"
+        if origin_branch in [r.name for r in repo.refs]:
+            repo.git.checkout("-b", branch, origin_branch)
+        else:
+            repo.create_head(branch).checkout()
+
+    @staticmethod
+    def _current_branch(repo_path: Path) -> str:
+        try:
+            return git.Repo(str(repo_path)).active_branch.name
+        except Exception:
+            return "unknown"
+
+    # Compatibilidad con supervisor actual
     def get_metadata(self, run_id: str) -> dict | None:
         with _conn() as conn:
             row = conn.execute(
@@ -89,6 +200,7 @@ class WorkspaceManager:
         short_run = run_id.split("-")[0]
         branch_name = f"task/{short_run}-{_slug(task_message)}"
 
+        _validate_no_main(branch_name)
         if branch_name in [h.name for h in repo.heads]:
             branch_ref = repo.heads[branch_name]
         else:

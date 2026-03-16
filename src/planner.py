@@ -3,9 +3,9 @@ import json
 import logging
 from pathlib import Path
 import litellm
+from src.workspace_context import get_active_repo_path
 
 MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-chat")
-SPECS_DIR = Path(os.getenv("REPO_PATH", "/root/agent-serve")) / "specs"
 
 log = logging.getLogger("planner")
 
@@ -88,9 +88,10 @@ def generate_spec(message: str) -> dict:
 
 def save_spec(spec: dict) -> str:
     """Guarda la spec como archivo .md en specs/ y retorna el path."""
-    SPECS_DIR.mkdir(exist_ok=True)
+    specs_dir = get_active_repo_path() / "specs"
+    specs_dir.mkdir(exist_ok=True)
     title = spec.get("title", "spec").lower().replace(" ", "-")
-    path = SPECS_DIR / f"{title}.md"
+    path = specs_dir / f"{title}.md"
 
     lines = [f"# {spec.get('title', 'Spec')}\n"]
     for key, label in [
