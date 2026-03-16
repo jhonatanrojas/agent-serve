@@ -58,10 +58,16 @@ def _is_analysis_subtask(text: str) -> bool:
     t = (text or "").strip().lower()
     analysis_signals = ("analizar", "investigar", "revisar", "documentar", "diagnosticar", "explorar",
                         "mockup", "wireframe", "planificar", "definir", "evaluar", "proponer", "diseñar")
+    # Subtareas de assets/diseño que un agente de código no puede ejecutar
+    asset_signals = ("seleccionar", "crear foto", "crear imagen", "fotografía", "foto profesional",
+                     "avatar", "ilustración", "diseño gráfico", "optimizar imagen", "optimizar foto",
+                     "elegir imagen", "buscar imagen", "conseguir imagen", "subir imagen")
     implementation_signals = ("implementar", "cambiar", "modificar", "crear", "agregar", "fix", "corregir",
                                "actualizar", "escribir", "editar", "refactorizar", "añadir", "insertar")
     if any(sig in t for sig in implementation_signals):
         return False
+    if any(sig in t for sig in asset_signals):
+        return True
     return any(sig in t for sig in analysis_signals)
 
 
@@ -338,9 +344,16 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
                 if consecutive_no_change >= 2:
                     reason = "Bloqueo detectado: múltiples intentos sin cambios de archivos"
                     _trace_decision(run_id, "coding", "blocked_no_progress", {"subtask": subtask, "count": consecutive_no_change}, risk_level="medium")
-                    append_event(run_id, "run_paused", "coding", {"subtask": subtask, "reason": reason, "attempt": attempt_count})
-                    append_checkpoint(run_id, "paused_by_no_progress", "coding", {"subtask": subtask, "reason": reason, "attempt": attempt_count})
-                    return f"⏸️ {reason}. Solicita ayuda o ajusta la subtarea."
+                    append_event(run_id, "subtask_skipped", "coding", {"subtask": subtask, "reason": reason, "attempt": attempt_count})
+                    append_checkpoint(run_id, "subtask_skipped_no_progress", "coding", {"subtask": subtask, "reason": reason, "attempt": attempt_count})
+                    notify(f"⚠️ Subtarea saltada por bloqueo: `{subtask[:80]}`\n_{reason}_")
+                    completed_subtasks.add(subtask)  # marcar como procesada para no reintentar
+                    update_run_state(
+                        run_id,
+                        completed_subtasks=sorted(completed_subtasks),
+                        next_action=f"code_subtask_{i + 1}" if i < len(coding_subtasks) else "review",
+                    )
+                    break
                 append_event(run_id, "coding_failed", "coding", {"subtask": subtask, "status": status, "result": result.get("result", "")[:300], "attempt": attempt_count})
                 _trace_decision(run_id, "coding", "subtask_failed", {"subtask": subtask, "status": status, "attempt": attempt_count})
                 append_checkpoint(run_id, "subtask_failed", "coding", {"subtask": subtask, "status": status, "attempt": attempt_count})
