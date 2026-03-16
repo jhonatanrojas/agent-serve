@@ -695,12 +695,13 @@ async def handle_codexlogin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ALLOWED_USER:
         return
 
-    await update.message.reply_text("🔐 Iniciando device flow de Codex CLI...", **_no_preview_kwargs())
-
     import subprocess, threading, re, time, os as _os
 
     def strip_ansi(text):
         return re.sub(r'\x1B\[[0-9;]*[mK]', '', text)
+
+    auth_path = _os.path.expanduser("~/.codex/auth.json")
+    mtime_before = _os.path.getmtime(auth_path) if _os.path.exists(auth_path) else 0
 
     loop = asyncio.get_running_loop()
 
@@ -724,12 +725,11 @@ async def handle_codexlogin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(msg, **_no_preview_kwargs())
 
-    auth_path = _os.path.expanduser("~/.codex/auth.json")
-
     def wait_and_notify():
-        # Esperar hasta 10 min a que aparezca auth.json (señal de login exitoso)
-        for _ in range(600):
-            if _os.path.exists(auth_path):
+        # Polling: esperar hasta 15 min a que auth.json sea creado/actualizado
+        for _ in range(900):
+            mtime_now = _os.path.getmtime(auth_path) if _os.path.exists(auth_path) else 0
+            if mtime_now > mtime_before:
                 break
             time.sleep(1)
 
@@ -737,7 +737,8 @@ async def handle_codexlogin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             subprocess.run(["codex", "login", "status"], capture_output=True, text=True).stdout
         ).strip()
 
-        if "logged in" in status.lower() or _os.path.exists(auth_path):
+        mtime_now = _os.path.getmtime(auth_path) if _os.path.exists(auth_path) else 0
+        if mtime_now > mtime_before:
             msg_done = f"✅ Codex autenticado exitosamente!\n{status}"
         else:
             msg_done = f"⚠️ Codex login no completado o expiró.\n{status}"
