@@ -114,7 +114,7 @@ def run_coder(subtask: str, context: str = "", progress_callback=None,
                 tools=_CODER_TOOLS,
                 tool_choice="auto",
                 mode=mode,
-                manual_model_key=None if manual_model_key == "codex_mini" else manual_model_key,
+                manual_model_key=manual_model_key,
                 repo_path=repo_path,
             )
             msg = llm_result.message

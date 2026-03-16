@@ -110,9 +110,9 @@ def run_llm(
     if not candidates:
         raise LLMError("No hay modelos disponibles para esta tarea.", attempts=[])
 
-    # --- Codex CLI runner (coder/tests con sesión activa, o cuando manual_model_key=codex_mini) ---
-    _CODEX_ROLES = ("tests",)
-    use_codex_cli = ((agent_role in _CODEX_ROLES) or (manual_model_key == "codex_mini" and agent_role != "coder")) and repo_path
+    # --- Codex CLI runner (cuando manual_model_key=codex_mini o rol tests, con sesión activa) ---
+    _CODEX_ROLES = ("tests", "coder")
+    use_codex_cli = (manual_model_key == "codex_mini" or agent_role in _CODEX_ROLES) and repo_path
     if use_codex_cli:
         from src.codex_runner import is_codex_session_active, run_codex_task
         if is_codex_session_active():

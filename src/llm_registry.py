@@ -163,6 +163,14 @@ def load_dynamic_models():
             # Inyectar la API key en el entorno si fue guardada
             if api_key_env and api_key_val:
                 os.environ.setdefault(api_key_env, api_key_val)
+            # Inferir api_key_env desde el provider si no está guardado explícitamente
+            _provider = model.split("/")[0].lower() if "/" in model else ""
+            _key_map = {
+                "deepseek": "DEEPSEEK_API_KEY", "openai": "OPENAI_API_KEY",
+                "gemini": "GEMINI_API_KEY", "mistral": "MISTRAL_API_KEY",
+                "anthropic": "ANTHROPIC_API_KEY",
+            }
+            inferred_env = api_key_env or _key_map.get(_provider)
             MODELS_REGISTRY[key] = ModelEntry(
                 key=key,
                 model=model,
@@ -170,7 +178,7 @@ def load_dynamic_models():
                 supports_tools=True,
                 use_cases=[u.strip() for u in (use_cases or "general").split(",")],
                 notes=notes,
-                enabled=True,
+                enabled=bool(not inferred_env or os.getenv(inferred_env)),
             )
     except Exception:
         pass
