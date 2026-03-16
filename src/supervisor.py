@@ -56,8 +56,10 @@ def _parse_subtask_index(next_action: str) -> int:
 
 def _is_analysis_subtask(text: str) -> bool:
     t = (text or "").strip().lower()
-    analysis_signals = ("analizar", "investigar", "revisar", "documentar", "diagnosticar", "explorar")
-    implementation_signals = ("implementar", "cambiar", "modificar", "crear", "agregar", "fix", "corregir", "actualizar")
+    analysis_signals = ("analizar", "investigar", "revisar", "documentar", "diagnosticar", "explorar",
+                        "mockup", "wireframe", "planificar", "definir", "evaluar", "proponer", "diseñar")
+    implementation_signals = ("implementar", "cambiar", "modificar", "crear", "agregar", "fix", "corregir",
+                               "actualizar", "escribir", "editar", "refactorizar", "añadir", "insertar")
     if any(sig in t for sig in implementation_signals):
         return False
     return any(sig in t for sig in analysis_signals)

@@ -149,6 +149,9 @@ def run_llm(
     attempts: list[dict] = []
 
     for entry in candidates:
+        # codex_mini no tiene API key → nunca intentar via LiteLLM
+        if entry.key == "codex_mini" and not os.getenv("OPENAI_API_KEY"):
+            continue
         attempt: dict = {"model_key": entry.key, "model_str": entry.model}
         _stats[entry.key]["calls"] += 1
         try:

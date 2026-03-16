@@ -232,8 +232,10 @@ class WorkspaceManager:
             return existing
 
         repo = git.Repo(str(self.repo_path))
+        stashed = False
         if repo.is_dirty(untracked_files=False):
-            raise WorkspaceError("Repositorio con cambios sin commitear; no se puede crear branch de tarea.")
+            repo.git.stash("push", "-m", "agent-auto-stash")
+            stashed = True
 
         # Si estamos en una branch task/* anterior, volver a la base del workspace activo
         current = repo.active_branch.name
@@ -262,6 +264,12 @@ class WorkspaceManager:
             branch_ref = repo.create_head(branch_name)
 
         branch_ref.checkout()
+
+        if stashed:
+            try:
+                repo.git.stash("pop")
+            except Exception:
+                pass  # conflicto de stash — ignorar, el agente trabajará desde cero
 
         ts = _now()
         with _conn() as conn:

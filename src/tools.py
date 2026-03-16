@@ -23,8 +23,20 @@ def _repo() -> git.Repo:
 def git_pull() -> str:
     try:
         repo = _repo()
-        result = repo.remotes.origin.pull()
-        return f"git pull OK: {result[0].commit.hexsha[:7]}"
+        branch = repo.active_branch.name
+        # Si la branch tiene upstream, pull normal
+        tracking = repo.active_branch.tracking_branch()
+        if tracking:
+            result = repo.remotes.origin.pull()
+            return f"git pull OK: {result[0].commit.hexsha[:7]}"
+        # Sin upstream: fetch origin y merge desde default branch
+        repo.remotes.origin.fetch()
+        try:
+            default = repo.git.symbolic_ref("refs/remotes/origin/HEAD").split("/")[-1]
+        except Exception:
+            default = "main"
+        repo.git.merge(f"origin/{default}", "--no-edit")
+        return f"git pull OK (merged origin/{default} into {branch})"
     except Exception as e:
         return f"git pull error: {e}"
 
@@ -202,11 +214,8 @@ def write_file(path: str, content: str) -> str:
 # Tool definitions para LiteLLM
 def codex_exec(prompt: str, writable_paths: list[str] | None = None) -> str:
     """Ejecuta una tarea de código con Codex CLI usando la sesión activa (~/.codex/auth.json)."""
-    import subprocess
+    import subprocess, os, signal
     repo_path = str(get_active_repo_path())
-    # Permisos: lectura total del disco + escritura en el repo
-    write_targets = writable_paths or [repo_path]
-    write_perms = ",".join(f'"{p}"' for p in write_targets)
     cmd = [
         "codex", "exec",
         "-c", "sandbox_permissions=[\"disk-full-read-access\"]",
@@ -214,17 +223,19 @@ def codex_exec(prompt: str, writable_paths: list[str] | None = None) -> str:
         prompt,
     ]
     try:
-        result = subprocess.run(
-            cmd,
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            timeout=120,
+        proc = subprocess.Popen(
+            cmd, cwd=repo_path,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True,  # nuevo grupo de procesos
         )
-        output = (result.stdout or "") + (result.stderr or "")
+        try:
+            stdout, stderr = proc.communicate(timeout=90)
+        except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            proc.wait()
+            return "codex exec: timeout (90s)"
+        output = (stdout or "") + (stderr or "")
         return output[:2000] if output else "codex exec: sin output"
-    except subprocess.TimeoutExpired:
-        return "codex exec: timeout (120s)"
     except Exception as e:
         return f"codex exec error: {e}"
 
@@ -376,8 +387,17 @@ def notion_tool(tool_name: str, arguments: dict) -> str:
     return notion_mcp.call_tool(tool_name, arguments)
 
 
+_SERENA_OUTPUT_LIMIT = 3000  # chars máx para tools Serena verbosas
+
 def serena_tool(tool_name: str, arguments: dict) -> str:
-    return serena_mcp.call_tool(tool_name, arguments)
+    # Inyectar límite de output para tools que lo soportan
+    if tool_name in ("list_dir", "find_file", "find_symbol", "search_files_by_name"):
+        arguments = {**arguments, "max_answer_chars": _SERENA_OUTPUT_LIMIT}
+    result = serena_mcp.call_tool(tool_name, arguments)
+    # Truncar igualmente por si acaso
+    if isinstance(result, str) and len(result) > _SERENA_OUTPUT_LIMIT:
+        result = result[:_SERENA_OUTPUT_LIMIT] + "\n...[truncado]"
+    return result
 
 
 def _load_mcp_tools(mcp_client):

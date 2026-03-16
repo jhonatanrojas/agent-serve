@@ -8,6 +8,9 @@ from typing import Optional
 MAX_SAME_TOOL_CALLS = int(__import__('os').getenv("AGENT_MAX_SAME_TOOL_CALLS", "3"))
 MAX_SAME_RESULT = int(__import__('os').getenv("AGENT_MAX_SAME_RESULT", "2"))
 
+# Tools de solo lectura — no cuentan para el loop guard
+_READ_ONLY_TOOLS = {"read_file", "list_dir", "find_file", "find_symbol", "git_status", "git_diff_summary"}
+
 
 @dataclass
 class LoopGuard:
@@ -47,6 +50,8 @@ class LoopGuard:
     def record_call(self, tool_name: str, args: dict) -> Optional[str]:
         """Registra una tool call. Retorna mensaje de loop si se detecta, None si OK."""
         self.step += 1
+        if tool_name in _READ_ONLY_TOOLS:
+            return None  # lectura no cuenta como loop
         call_hash = self._hash_call(tool_name, args)
         self.tool_call_counts[call_hash] += 1
         count = self.tool_call_counts[call_hash]

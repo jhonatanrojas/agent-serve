@@ -222,8 +222,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     set_session(chat_id, current_run_id=maybe_run, current_task_id=task.id)
                 await notify(result[:1000] if result else "✅ Tarea completada.")
 
-                # No hacer push/PR si la tarea fue pausada o cancelada
-                if result and any(x in result for x in ("⏸️", "⛔", "Cancelado", "pausada", "pausado")):
+                # No hacer push/PR si la tarea fue pausada, cancelada o falló el workspace
+                if result and any(x in result for x in ("⏸️", "⛔", "Cancelado", "pausada", "pausado", "❌ No se pudo")):
                     return
 
                 verdict = _extract_review_verdict(result or "")
@@ -1183,6 +1183,16 @@ async def handle_codexkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     if result.returncode == 0:
         _os.environ["OPENAI_API_KEY"] = api_key
+        # Persistir en .env
+        from pathlib import Path
+        import re as _re
+        env_path = Path(__file__).parent / ".env"
+        text = env_path.read_text() if env_path.exists() else ""
+        if "OPENAI_API_KEY=" in text:
+            text = _re.sub(r"OPENAI_API_KEY=.*", f"OPENAI_API_KEY={api_key}", text)
+        else:
+            text += f"\nOPENAI_API_KEY={api_key}\n"
+        env_path.write_text(text)
         from src.llm_registry import load_dynamic_models
         load_dynamic_models()
         status = subprocess.run(["codex", "login", "status"], capture_output=True, text=True).stdout.strip()
@@ -1281,14 +1291,25 @@ def main():
     except Exception as e:
         print(f"[startup] cleanup_stale_runs error: {e}")
 
-    # Auto-resume: si hay un run interrumpido con subtareas pendientes, notificar
+    # Auto-resume: si hay un run interrumpido, retomarlo automáticamente
     try:
         from src.run_state import get_latest_active_run
         interrupted = get_latest_active_run()
-        if interrupted and interrupted.get("next_action") and interrupted.get("phase") not in ("done", "failed"):
-            rid = interrupted["run_id"][:8]
+        if interrupted and interrupted.get("phase") not in ("done", "failed"):
+            next_action = interrupted.get("next_action", "")
+            rid = interrupted["run_id"]
             task_msg = interrupted.get("source_message", "")[:60]
-            sync_send(f"⚡ Bot reiniciado. Hay una tarea interrumpida: `{task_msg}`\nUsa /resume para reanudar o /stop para cancelar.")
+            # Solo auto-resume si ya pasó planning (tiene trabajo real pendiente)
+            if next_action and next_action not in ("planning", ""):
+                sync_send(f"⚡ Reanudando tarea interrumpida: `{task_msg[:50]}`\nDesde: `{next_action}`")
+                def _do_auto_resume():
+                    from src.supervisor import resume_run
+                    cb = _make_progress_callback(ALLOWED_USER)
+                    result = resume_run(rid, progress_callback=cb)
+                    sync_send(result[:500] if result else "✅ Tarea reanudada completada.")
+                loop.run_in_executor(None, _do_auto_resume)
+            else:
+                sync_send(f"⚡ Bot reiniciado. Tarea pendiente: `{task_msg}`\nUsa /resume para reanudar o /stop para cancelar.")
     except Exception as e:
         print(f"[startup] auto-resume check error: {e}")
 
