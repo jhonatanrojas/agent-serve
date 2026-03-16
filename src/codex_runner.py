@@ -21,44 +21,26 @@ def is_codex_session_active() -> bool:
 
 def run_codex_task(prompt: str, repo_path: str) -> str:
     """
-    Ejecuta `codex exec --full-auto -C <repo_path> -o <tmpfile> <prompt>`.
-    Retorna el texto de la última respuesta del agente.
-    Lanza RuntimeError si falla o timeout.
+    Ejecuta `codex exec --full-auto -C <repo_path> <prompt>`.
+    Retorna el output del agente. Lanza RuntimeError si falla o timeout.
     """
     if not is_codex_session_active():
         raise RuntimeError("No hay sesión activa de Codex CLI.")
 
-    with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
-        out_file = f.name
-
     try:
         result = subprocess.run(
-            [
-                "codex", "exec",
-                "--full-auto",
-                "--dangerously-bypass-approvals-and-sandbox",
-                "-C", repo_path,
-                "-o", out_file,
-                prompt,
-            ],
+            ["codex", "exec", "--full-auto", "-C", repo_path, prompt],
             capture_output=True,
             text=True,
             timeout=TIMEOUT,
         )
         log.info(f"[codex_runner] exit={result.returncode} repo={repo_path}")
 
-        if result.returncode != 0:
-            raise RuntimeError(f"codex exec falló (exit {result.returncode}): {result.stderr[:300]}")
+        # Detectar error en stderr aunque returncode sea 0
+        if result.returncode != 0 or (result.stderr and result.stderr.strip().startswith("error:")):
+            raise RuntimeError(f"codex exec falló (exit {result.returncode}): {(result.stderr or result.stdout)[:300]}")
 
-        output = ""
-        if os.path.exists(out_file):
-            with open(out_file) as f:
-                output = f.read().strip()
-
-        return output or result.stdout.strip() or "(sin output)"
+        return result.stdout.strip() or "(sin output)"
 
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"codex exec timeout ({TIMEOUT}s)")
-    finally:
-        if os.path.exists(out_file):
-            os.unlink(out_file)
