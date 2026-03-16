@@ -1,6 +1,6 @@
 import os
 import logging
-import litellm
+from src.llm_runner import run_llm
 from src.loop_guard import LoopGuard
 from src.task_context import TaskContext
 from src.executor import execute_tool_call, _safe_parse_args, is_cancelled, MAX_ITERATIONS
@@ -60,18 +60,18 @@ def run_coder(subtask: str, context: str = "", progress_callback=None) -> dict:
             return {"result": "⛔ Cancelado.", "modified_files": ctx.modified_files, "status": "cancelled"}
 
         try:
-            response = litellm.completion(
-                model=MODEL,
+            llm_result = run_llm(
                 messages=messages,
+                agent_role="coder",
                 tools=_CODER_TOOLS,
                 tool_choice="auto",
             )
+            msg = llm_result.message
         except Exception as e:
             log.error("Error LLM coder: %s", e)
             ctx.finish("error", str(e))
             return {"result": f"Error: {e}", "modified_files": ctx.modified_files, "status": "error"}
 
-        msg = response.choices[0].message
         messages.append(msg.model_dump(exclude_none=True))
 
         if not msg.tool_calls:

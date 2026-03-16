@@ -1,7 +1,7 @@
 import os
 import logging
 from pathlib import Path
-import litellm
+from src.llm_runner import run_llm
 from src.repomap import get_or_build_repo_map
 
 MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-chat")
@@ -81,14 +81,14 @@ def find_relevant_files(message: str, file_map: dict, repo_map: dict | None = No
 
     file_list = "\n".join(f"- {f} ({v['lines']} líneas)" for f, v in file_map.items())
     try:
-        response = litellm.completion(
-            model=MODEL,
+        result = run_llm(
             messages=[{"role": "user", "content": _RELEVANT_PROMPT.format(
                 file_list=file_list, message=message
             )}],
-            max_tokens=300,
+            agent_role="analyst",
+            require_tools=False,
         )
-        content = response.choices[0].message.content.strip()
+        content = result.message.content.strip()
         content = content.replace("```json", "").replace("```", "").strip()
         import json
         start, end = content.find("{"), content.rfind("}") + 1
@@ -109,14 +109,14 @@ def assess_impact(message: str, relevant_files: list[str]) -> dict:
 
     try:
         import json
-        response = litellm.completion(
-            model=MODEL,
+        result = run_llm(
             messages=[{"role": "user", "content": _IMPACT_PROMPT.format(
                 file_contents=file_contents, message=message
             )}],
-            max_tokens=400,
+            agent_role="analyst",
+            require_tools=False,
         )
-        content = response.choices[0].message.content.strip()
+        content = result.message.content.strip()
         content = content.replace("```json", "").replace("```", "").strip()
         start, end = content.find("{"), content.rfind("}") + 1
         return json.loads(content[start:end])

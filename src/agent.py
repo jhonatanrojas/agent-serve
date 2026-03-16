@@ -1,7 +1,7 @@
 import os
 import logging
-import litellm
 from src.tools import TOOLS
+from src.llm_runner import run_llm
 from src.memory import search_memory
 from src.loop_guard import LoopGuard
 from src.task_context import TaskContext
@@ -39,18 +39,21 @@ def build_system_prompt(memories: str) -> str:
     return _SYSTEM_BASE
 
 
-def call_model(messages: list) -> object:
-    response = litellm.completion(
-        model=MODEL,
+def call_model(messages: list, mode: str = "auto", manual_model_key: str | None = None) -> object:
+    result = run_llm(
         messages=messages,
+        agent_role="general",
         tools=TOOLS,
         tool_choice="auto",
+        mode=mode,
+        manual_model_key=manual_model_key,
     )
-    return response.choices[0].message
+    return result.message
 
 
 def run_agent_loop(messages: list, ctx: TaskContext, guard: LoopGuard,
-                   progress_callback=None) -> str:
+                   progress_callback=None, mode: str = "auto",
+                   manual_model_key: str | None = None) -> str:
     for iteration in range(MAX_ITERATIONS):
         ctx.iterations = iteration + 1
 
@@ -61,7 +64,7 @@ def run_agent_loop(messages: list, ctx: TaskContext, guard: LoopGuard,
         log.info("Iteración %d/%d", iteration + 1, MAX_ITERATIONS)
 
         try:
-            msg = call_model(messages)
+            msg = call_model(messages, mode=mode, manual_model_key=manual_model_key)
         except Exception as e:
             log.error("Error LLM: %s", e)
             ctx.finish("error", str(e))
@@ -108,20 +111,18 @@ def run_agent_loop(messages: list, ctx: TaskContext, guard: LoopGuard,
     return f"⚠️ Límite de {MAX_ITERATIONS} iteraciones alcanzado.\n\n" + ctx.summary()
 
 
-def run_agent(user_message: str, progress_callback=None) -> str:
+def run_agent(user_message: str, progress_callback=None,
+              mode: str = "auto", manual_model_key: str | None = None) -> str:
     from src.supervisor import run_supervisor
 
     reset()
     log.info("Iniciando agente: %s", user_message[:100])
 
-    # Intentar flujo complejo via supervisor
     result = run_supervisor(user_message, progress_callback)
 
-    # Si el supervisor indica que es tarea simple, usar loop directo
     if result != "__SIMPLE__":
         return result
 
-    # Tarea simple: loop directo
     ctx = TaskContext(message=user_message)
     guard = LoopGuard()
     memories = load_memory(user_message)
@@ -131,4 +132,5 @@ def run_agent(user_message: str, progress_callback=None) -> str:
         {"role": "system", "content": system},
         {"role": "user", "content": user_message},
     ]
-    return run_agent_loop(messages, ctx, guard, progress_callback)
+    return run_agent_loop(messages, ctx, guard, progress_callback,
+                          mode=mode, manual_model_key=manual_model_key)

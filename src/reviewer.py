@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 
 import git
-import litellm
+from src.llm_runner import run_llm
 
 MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-chat")
 REPO_PATH = Path(os.getenv("REPO_PATH", "/root/agent-serve"))
@@ -124,17 +124,17 @@ def run_reviewer(spec_summary: str, modified_files: list[str],
     criteria_str = "\n".join(f"- {c}" for c in (criteria or ["Sin criterios definidos"]))
 
     try:
-        response = litellm.completion(
-            model=MODEL,
+        llm_result = run_llm(
             messages=[{"role": "user", "content": _REVIEW_PROMPT.format(
                 spec_summary=spec_summary,
                 diff_content=diff_content,
                 file_contents=file_contents,
                 criteria=criteria_str,
             )}],
-            max_tokens=700,
+            agent_role="reviewer",
+            require_tools=False,
         )
-        content = response.choices[0].message.content.strip()
+        content = llm_result.message.content.strip()
         content = content.replace("```json", "").replace("```", "").strip()
         start, end = content.find("{"), content.rfind("}") + 1
         result = json.loads(content[start:end])

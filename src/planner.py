@@ -2,7 +2,7 @@ import os
 import json
 import logging
 from pathlib import Path
-import litellm
+from src.llm_runner import run_llm
 
 MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-chat")
 SPECS_DIR = Path(os.getenv("REPO_PATH", "/root/agent-serve")) / "specs"
@@ -52,12 +52,12 @@ def classify_task(message: str) -> dict:
         return {"complexity": "complex", "reason": "contiene señales de alta complejidad"}
 
     try:
-        response = litellm.completion(
-            model=MODEL,
+        result = run_llm(
             messages=[{"role": "user", "content": _CLASSIFY_PROMPT.format(message=message)}],
-            max_tokens=100,
+            agent_role="planner",
+            require_tools=False,
         )
-        content = response.choices[0].message.content.strip()
+        content = result.message.content.strip()
         # Limpiar posibles bloques de código markdown
         content = content.replace("```json", "").replace("```", "").strip()
         start = content.find("{")
@@ -71,12 +71,12 @@ def classify_task(message: str) -> dict:
 def generate_spec(message: str) -> dict:
     """Llama al LLM para generar una spec estructurada."""
     try:
-        response = litellm.completion(
-            model=MODEL,
+        result = run_llm(
             messages=[{"role": "user", "content": _SPEC_PROMPT.format(message=message)}],
-            max_tokens=1000,
+            agent_role="planner",
+            require_tools=False,
         )
-        content = response.choices[0].message.content.strip()
+        content = result.message.content.strip()
         content = content.replace("```json", "").replace("```", "").strip()
         start = content.find("{")
         end = content.rfind("}") + 1
