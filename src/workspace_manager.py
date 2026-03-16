@@ -125,6 +125,14 @@ class WorkspaceManager:
 
         self._checkout_branch(repo, branch)
 
+        # Asegurar que .agent_tasks/ esté en .gitignore para no bloquear checkouts
+        gitignore = repo_dir / ".gitignore"
+        if not gitignore.exists() or ".agent_tasks" not in gitignore.read_text():
+            with gitignore.open("a") as f:
+                f.write("\n.agent_tasks/\n")
+            repo.index.add([".gitignore"])
+            repo.index.commit("chore: ignorar .agent_tasks (metadata del agente)")
+
         chat_key = str(chat_id)
         ts = _now()
         with _conn() as conn:
@@ -227,10 +235,11 @@ class WorkspaceManager:
                     (str(self.repo_path),),
                 ).fetchone()
             base = (row[0] if row else None) or "agent/work"
-            if base in [h.name for h in repo.heads]:
-                repo.heads[base].checkout()
-            elif "agent/work" in [h.name for h in repo.heads]:
-                repo.heads["agent/work"].checkout()
+            target = base if base in [h.name for h in repo.heads] else (
+                "agent/work" if "agent/work" in [h.name for h in repo.heads] else None
+            )
+            if target:
+                repo.heads[target].checkout(force=True)
 
         base_branch = repo.active_branch.name
         short_run = run_id.split("-")[0]
