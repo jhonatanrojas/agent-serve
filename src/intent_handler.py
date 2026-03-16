@@ -115,21 +115,47 @@ async def handle_natural_message(
             ws_data = None
 
         lines = []
+        msg_lower = message.lower()
 
         # Estado del run activo
         from src.run_state import get_run_state, list_recent_runs
         runs = list_recent_runs(limit=1)
+        active_run = None
         if runs:
-            run = get_run_state(runs[0]["run_id"])
-            if run and run.get("phase") not in ("done", None):
-                lines.append(f"⚙️ **Tarea en ejecución**")
-                lines.append(f"• Fase: `{run.get('phase')}`")
-                if run.get("current_subtask"):
-                    lines.append(f"• Subtarea actual: `{run.get('current_subtask')}`")
-                idx = run.get("current_subtask_index", 0)
-                total = len(run.get("spec", {}).get("subtasks", []))
-                if total:
-                    lines.append(f"• Progreso: {idx}/{total} subtareas")
+            active_run = get_run_state(runs[0]["run_id"])
+
+        # Pregunta sobre cambios/diff de una tarea específica
+        if active_run and any(w in msg_lower for w in ("cambio", "modific", "hiciste", "realizaste", "diff", "archivo")):
+            modified = active_run.get("modified_files", [])
+            lines.append(f"📝 **Archivos modificados en `{active_run.get('source_message','')[:50]}`**")
+            if modified:
+                for f in modified:
+                    lines.append(f"  - `{f}`")
+                # Mostrar diff resumido si hay workspace
+                if ws_data:
+                    try:
+                        import git as _git
+                        repo = _git.Repo(ws_data["repo_path"])
+                        diff = repo.git.diff("HEAD", "--stat")
+                        if diff:
+                            lines.append(f"\n```\n{diff[:800]}\n```")
+                    except Exception:
+                        pass
+            else:
+                lines.append("  Sin archivos modificados aún.")
+            await notify("\n".join(lines))
+            return True
+
+        # Estado de ejecución
+        if active_run and active_run.get("phase") not in ("done", None):
+            lines.append("⚙️ **Tarea en ejecución**")
+            lines.append(f"• Fase: `{active_run.get('phase')}`")
+            if active_run.get("current_subtask"):
+                lines.append(f"• Subtarea actual: `{active_run.get('current_subtask')}`")
+            idx = active_run.get("current_subtask_index", 0)
+            total = len(active_run.get("spec", {}).get("subtasks", []))
+            if total:
+                lines.append(f"• Progreso: {idx}/{total} subtareas")
 
         # Backlog de tareas
         if ws_data:
