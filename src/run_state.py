@@ -242,3 +242,40 @@ def append_attempt(run_id: str, attempt: dict) -> bool:
 
     attempts = [*current.get("attempts", []), attempt][-MAX_ATTEMPT_HISTORY:]
     return update_run_state(run_id, attempts=attempts)
+
+
+def list_recent_runs(limit: int = 10) -> list[dict]:
+    with _conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT run_id, phase, current_subtask, updated_at, source_message
+            FROM run_states
+            ORDER BY datetime(updated_at) DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+    return [
+        {
+            "run_id": r[0],
+            "phase": r[1],
+            "current_subtask": r[2] or "",
+            "updated_at": r[3],
+            "source_message": r[4] or "",
+        }
+        for r in rows
+    ]
+
+
+def get_latest_run() -> dict | None:
+    runs = list_recent_runs(1)
+    return runs[0] if runs else None
+
+
+def get_latest_active_run() -> dict | None:
+    runs = list_recent_runs(50)
+    for r in runs:
+        if r.get("phase") != "done":
+            return r
+    return runs[0] if runs else None

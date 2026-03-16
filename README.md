@@ -1,58 +1,62 @@
 # Agent Server
 
-Agente autónomo que recibe instrucciones via Telegram, ejecuta tareas de desarrollo y reporta avances en tiempo real.
+Agente autónomo operado por Telegram para tareas de ingeniería de software con ejecución en fases, guardrails, persistencia de runs, recuperación y observabilidad.
 
-## Arquitectura
+## Qué hay nuevo (resumen rápido)
 
-```
-run_agent()
-  ├── run_supervisor()        [tareas complejas]
-  │     ├── planner           → clasifica complejidad, genera spec
-  │     ├── analyst           → escanea codebase, evalúa impacto
-  │     ├── coder             → implementa subtareas (scope acotado)
-  │     ├── reviewer          → verifica criterios de aceptación
-  │     └── validator         → lint (ruff) + syntax check
-  └── run_agent_loop()        [tareas simples]
-        └── guardrails: loop guard + /stop + MAX_ITERATIONS
-```
-
-### Módulos
-
-| Módulo | Responsabilidad |
-|--------|----------------|
-| `src/agent.py` | Punto de entrada, orquesta supervisor o loop directo |
-| `src/supervisor.py` | Controla flujo entre subagentes, detecta loops |
-| `src/planner.py` | Clasifica complejidad, genera spec estructurada |
-| `src/analyst.py` | Escanea repo, identifica archivos relevantes, evalúa impacto |
-| `src/coder.py` | Implementa subtareas con tools limitadas a escritura de código |
-| `src/reviewer.py` | Verifica criterios de aceptación post-coder |
-| `src/validator.py` | Lint (ruff) + syntax check sobre archivos modificados |
-| `src/executor.py` | `execute_tool_call`, cancel/reset, MAX_ITERATIONS (compartido) |
-| `src/loop_guard.py` | Detecta repetición de tool calls y resultados |
-| `src/task_context.py` | Estado formal de tarea: status, historial, archivos modificados |
-| `src/tools.py` | Definición y registro de todas las tools disponibles |
-| `src/memory.py` | Memoria persistente entre conversaciones (SQLite) |
-| `src/database.py` | Queries SQL sobre base de datos local |
-| `src/search.py` | Búsqueda web con DuckDuckGo |
-| `src/scheduler.py` | Tareas programadas con APScheduler |
-| `src/notion.py` | Cliente Notion MCP (22 tools) |
-| `src/serena.py` | Cliente Serena MCP (27 tools de coding semántico) |
+- Runtime persistente con `run_id`, eventos, checkpoints, validaciones e intentos.
+- Reanudación de corridas con `resume_run(run_id)`.
+- Workspace por tarea (branch aislada) + gate de git por branch.
+- RepoMap persistente para acelerar análisis contextual.
+- RecoveryAgent para retry/pause por subtarea.
+- Reviewer con contexto de diff + `required_fixes`.
+- Validator incremental con lint/typecheck y tests relacionados.
+- Seguridad operacional:
+  - sandbox global de paths de archivos (`read_file`/`write_file`).
+  - policy central de ejecución de tools (allowlist, timeout y truncado de output).
+- Observabilidad operativa por Telegram: `/status`, `/plan`, `/resume`, `/logs`, `/diff`, `/stop`.
+- Mensajes Telegram sin preview de links para evitar “imágenes” automáticas.
 
 ---
 
-## Stack
+## Arquitectura
 
-- **LiteLLM** — soporte multi-proveedor (DeepSeek, Claude, GPT-4)
-- **python-telegram-bot** — interfaz de control por Telegram
-- **GitPython** — git pull / git push automático
-- **Notion MCP** — integración con Notion via MCP
-- **Serena MCP** — coding semántico (find_symbol, replace_content, etc.)
-- **Memoria SQLite** — memoria persistente entre conversaciones
-- **DuckDuckGo Search** — búsqueda web sin API key
-- **APScheduler** — tareas programadas con cron desde Telegram
-- **SQLite DB** — base de datos local para el agente
-- **ruff** — linter para validación técnica post-cambios
-- **systemd** — servicio en segundo plano
+```text
+run_agent()
+  ├── run_supervisor()             [tareas complejas]
+  │     ├── planner                → complejidad + spec
+  │     ├── workspace_manager      → branch por run
+  │     ├── analyst + repomap      → contexto del repo
+  │     ├── coder                  → implementación por subtareas
+  │     ├── recovery_agent         → retry/pause adaptativo
+  │     ├── reviewer               → diff + criterios + required_fixes
+  │     ├── validator              → syntax/lint/typecheck/tests relacionados
+  │     └── run_state              → eventos/checkpoints/validaciones/intentos
+  └── run_agent_loop()             [tareas simples]
+        └── executor + shell_policy + loop_guard
+```
+
+---
+
+## Módulos clave
+
+| Módulo | Responsabilidad |
+|---|---|
+| `src/agent.py` | Entrada principal, decide supervisor o loop simple |
+| `src/supervisor.py` | Orquestación multi-fase, checkpoints/eventos, `resume_run` |
+| `src/run_state.py` | Persistencia de corridas y helpers de consulta de runs |
+| `src/run_dashboard.py` | Dashboard textual, plan y logs por `run_id` |
+| `src/workspace_manager.py` | Workspace/branch aislado por corrida |
+| `src/git_gate.py` | Reglas por branch para commit/push/aprobación |
+| `src/repomap.py` | Mapa persistente del repositorio |
+| `src/recovery_agent.py` | Clasificación de fallos y estrategia retry/pause |
+| `src/reviewer.py` | Revisión con diff + `required_fixes` |
+| `src/validator.py` | Validación incremental + tests relacionados |
+| `src/path_sandbox.py` | Sandbox global de rutas dentro del repo |
+| `src/shell_policy.py` | Policy central de tools (allowlist/timeout/output) |
+| `src/executor.py` | Ejecución de tools aplicando policy + guardrails |
+| `src/tools.py` | Registro de tools locales + MCP + git seguro |
+| `main.py` | Bot Telegram, comandos operativos y ejecución async |
 
 ---
 
@@ -65,91 +69,49 @@ run_agent()
 
 ---
 
-## Instalación
-
-### 1. Clonar el repositorio
+## Instalación rápida
 
 ```bash
 git clone git@github.com:jhonatanrojas/agent-serve.git
 cd agent-serve
-```
-
-### 2. Configurar SSH a GitHub
-
-```bash
-ssh-keygen -t ed25519 -C "github-agent" -f ~/.ssh/id_ed25519 -N ""
-cat ~/.ssh/id_ed25519.pub
-```
-
-Agregar la clave en: **github.com → Settings → SSH and GPG keys → New SSH key**
-
-Verificar:
-```bash
-ssh -T git@github.com
-```
-
-### 3. Configurar Git
-
-```bash
-git config --global user.name "tu nombre"
-git config --global user.email "tu@email.com"
-```
-
-### 4. Entorno Python
-
-```bash
-apt install -y python3.10-venv
 python3 -m venv venv
 venv/bin/pip install -r requirements.txt
-```
-
-### 5. Instalar Notion MCP
-
-```bash
 npm install -g @notionhq/notion-mcp-server
-```
-
-### 6. Instalar uv (para Serena MCP)
-
-```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-### 7. Configurar variables de entorno
-
-```bash
-cp .env.example .env
-nano .env
-```
+Crea `.env` (o adapta el existente):
 
 ```env
-# LLM — elegir uno
+# Modelo
 LLM_MODEL=deepseek/deepseek-chat
-DEEPSEEK_API_KEY=sk-...
-
-# LLM_MODEL=anthropic/claude-3-5-sonnet-20241022
-# ANTHROPIC_API_KEY=sk-ant-...
-
-# LLM_MODEL=gpt-4o
-# OPENAI_API_KEY=sk-...
+DEEPSEEK_API_KEY=...
 
 # Telegram
-TELEGRAM_TOKEN=         # Token de @BotFather
-TELEGRAM_ALLOWED_USER=  # Tu chat ID (obtener con @userinfobot)
+TELEGRAM_TOKEN=...
+TELEGRAM_ALLOWED_USER=...
 
-# Notion
-NOTION_API_KEY=ntn_...
+# Integraciones
+NOTION_API_KEY=...
 
-# Repositorio que gestionará el agente
+# Paths
 REPO_PATH=/ruta/al/repo
+RUNSTATE_DB_PATH=/ruta/a/.agent.db
+SQLITE_DB_PATH=/ruta/a/.agent.db
 
-# Guardrails (opcional)
+# Guardrails
 AGENT_MAX_ITERATIONS=20
 AGENT_MAX_SAME_TOOL_CALLS=3
 AGENT_MAX_SAME_RESULT=2
+
+# Shell policy (nueva)
+AGENT_TOOL_TIMEOUT_SECONDS=45
+AGENT_TOOL_OUTPUT_LIMIT=2000
+AGENT_TOOL_ALLOWLIST=
+AGENT_ALLOW_DYNAMIC_MCP_TOOLS=true
 ```
 
-### 8. Instalar servicio systemd
+Instala servicio systemd:
 
 ```bash
 cp agent-serve.service /etc/systemd/system/
@@ -158,103 +120,122 @@ systemctl enable agent-serve
 systemctl start agent-serve
 ```
 
-Verificar:
-```bash
-systemctl status agent-serve
-journalctl -u agent-serve -f
-```
-
 ---
 
-## Uso
-
-Enviar mensajes al bot de Telegram:
-
-```
-haz git pull y dime el estado del repo
-refactoriza el módulo de autenticación          ← tarea compleja: activa supervisor
-busca en internet las últimas versiones de FastAPI
-recuerda que prefiero commits en inglés
-programa un git pull diario a las 8am
-crea una tabla de tareas en la base de datos
-```
-
-### Comando especial
+## Comandos Telegram (operación)
 
 | Comando | Acción |
-|---------|--------|
-| `/stop` | Cancela la tarea en curso inmediatamente |
+|---|---|
+| `/stop` | Cancela la tarea en curso |
+| `/status [run_id]` | Dashboard textual del run activo/último |
+| `/plan [run_id]` | Vista de plan/subtareas del run |
+| `/resume [run_id]` | Reanuda una corrida persistida |
+| `/logs [run_id]` | Eventos recientes del run |
+| `/diff` | Resumen del diff local actual |
+
+> Si no pasas `run_id`, se usa el run activo o el más reciente.
 
 ---
 
-## Tools disponibles (63 total)
+## Seguridad operacional
 
-| Categoría | Tools |
-|-----------|-------|
-| Git | `git_pull`, `git_push` |
-| Archivos | `read_file`, `write_file`, `create_spec` |
-| Memoria | `add_memory`, `search_memory`, `get_all_memories` |
-| Búsqueda | `web_search` |
-| Base de datos | `sql_query`, `list_tables` |
-| Crons | `schedule_task`, `list_tasks`, `remove_task` |
-| Notion | 22 tools (CRUD páginas, bases de datos, bloques) |
-| Serena | 27 tools (búsqueda y edición semántica de código) |
+### 1) Sandbox de rutas
+- `read_file`/`write_file` solo operan dentro de `REPO_PATH`.
+- Rutas fuera del repo son bloqueadas.
 
----
+### 2) Policy central de tools
+- Allowlist global de tools.
+- Timeout por tool.
+- Truncado de output para evitar respuestas gigantes.
+- Soporte controlado para tools dinámicas MCP (`API-*`, `serena_*`, `notion_*`).
 
-## Guardrails
-
-| Guardrail | Comportamiento |
-|-----------|---------------|
-| `MAX_ITERATIONS` | Corta el loop tras N iteraciones (default: 20) |
-| Loop de tool calls | Detecta misma tool+args repetida >3 veces |
-| Loop de resultados | Detecta mismo resultado repetido >2 veces |
-| Loop de subagentes | Detecta mismo subagente invocado >2 veces sin progreso |
-| `/stop` | Cancela inmediatamente via `threading.Event` |
+### 3) Git seguro por branch
+- Gate de commit/push por branch.
+- Push requiere aprobación explícita.
+- Bloqueo de push a `main/master` según reglas del gate.
 
 ---
 
-## Flujo para tareas complejas
+## Flujo de validación/revisión
 
-Cuando el agente detecta palabras clave como `refactor`, `arquitectura`, `integrar`, `migrar`, etc., activa el supervisor:
-
-1. **Planner** — genera spec con objetivo, subtareas y criterios de aceptación → guardada en `specs/`
-2. **Analyst** — escanea el repo, identifica archivos relevantes, evalúa impacto (low/medium/high)
-3. **Coder** — ejecuta cada subtarea con tools limitadas a escritura de código
-4. **Reviewer** — verifica que los cambios cumplen los criterios de aceptación
-5. **Validator** — ejecuta ruff lint + syntax check sobre archivos modificados
-
-Todo el progreso se reporta en tiempo real por Telegram.
+- Reviewer usa snapshot de archivos + diff parcial.
+- Reviewer devuelve `required_fixes` estructurado.
+- Validator corre:
+  - syntax check,
+  - lint incremental,
+  - typecheck incremental,
+  - tests relacionados al área modificada.
 
 ---
 
-## Cambiar de proveedor LLM
+## Cómo probar (checklist práctico)
 
-```env
-# DeepSeek (más económico)
-LLM_MODEL=deepseek/deepseek-chat
-DEEPSEEK_API_KEY=sk-...
-
-# Claude (mejor para código)
-LLM_MODEL=anthropic/claude-3-5-sonnet-20241022
-ANTHROPIC_API_KEY=sk-ant-...
-
-# GPT-4
-LLM_MODEL=gpt-4o
-OPENAI_API_KEY=sk-...
-```
+### A. Smoke local de integridad
 
 ```bash
-systemctl restart agent-serve
+python -m compileall -q src main.py
+python -c "import main; print('main_import_ok')"
 ```
 
-## Comandos útiles
+### B. Probar dashboard y run-state
 
 ```bash
-# Ver logs en tiempo real
+python - <<'PY'
+from src.run_state import create_run_state, append_event, append_checkpoint
+from src.run_dashboard import build_run_dashboard, build_run_logs, build_run_plan
+rid = create_run_state('planning', 'demo')
+append_event(rid,'planning_started','planning',{'message':'demo'})
+append_checkpoint(rid,'planning_ready','planning',{})
+print(build_run_dashboard(rid))
+print(build_run_logs(rid))
+print(build_run_plan(rid))
+PY
+```
+
+### C. Probar sandbox de paths
+
+```bash
+python - <<'PY'
+from src.path_sandbox import resolve_repo_path, PathSandboxError
+try:
+    resolve_repo_path('/tmp/outside.txt')
+    print('ERROR: no bloqueó')
+except PathSandboxError:
+    print('OK: sandbox activo')
+PY
+```
+
+### D. Probar shell policy
+
+```bash
+python - <<'PY'
+from src.shell_policy import is_tool_allowed, truncate_output
+print('git_status allowed =', is_tool_allowed('git_status'))
+print('API-post-search allowed =', is_tool_allowed('API-post-search'))
+print(truncate_output('x'*2500)[-35:])
+PY
+```
+
+### E. Probar comandos Telegram
+1. Arranca servicio: `systemctl restart agent-serve`
+2. En Telegram ejecuta:
+   - `/status`
+   - `/plan`
+   - `/logs`
+   - `/diff`
+   - `/resume <run_id>`
+   - `/stop`
+
+Logs:
+
+```bash
 journalctl -u agent-serve -f
-
-# Reiniciar / detener
-systemctl restart agent-serve
-systemctl stop agent-serve
 ```
+
+---
+
+## Notas operativas
+
+- Si Telegram “muestra imagen”, normalmente es preview de URL en texto. El bot ya desactiva previews en respuestas.
+- Si el proveedor LLM falla (403/timeout), revisa keys/model/provider en `.env`.
+- Riesgos y backlog técnico: `docs/RISK_TASKS.md`.

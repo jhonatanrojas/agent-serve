@@ -8,6 +8,7 @@ from src.search import web_search
 from src.database import sql_query, list_tables
 from src.scheduler import schedule_task, list_tasks, remove_task
 from src.git_gate import can_commit, can_push, approve_push, clear_push_approval
+from src.path_sandbox import resolve_repo_path, PathSandboxError
 
 REPO_PATH = os.getenv("REPO_PATH", "/root/agent-serve")
 
@@ -127,15 +128,22 @@ def create_spec(title: str, content: str) -> str:
 
 def read_file(path: str) -> str:
     try:
-        return Path(path).read_text()
+        safe_path = resolve_repo_path(path)
+        return safe_path.read_text()
+    except PathSandboxError as e:
+        return f"Error leyendo archivo: {e}"
     except Exception as e:
         return f"Error leyendo archivo: {e}"
 
 
 def write_file(path: str, content: str) -> str:
     try:
-        Path(path).write_text(content)
-        return f"Archivo escrito: {path}"
+        safe_path = resolve_repo_path(path)
+        safe_path.parent.mkdir(parents=True, exist_ok=True)
+        safe_path.write_text(content)
+        return f"Archivo escrito: {safe_path}"
+    except PathSandboxError as e:
+        return f"Error escribiendo archivo: {e}"
     except Exception as e:
         return f"Error escribiendo archivo: {e}"
 
