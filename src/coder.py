@@ -1,6 +1,6 @@
 import os
 import logging
-import litellm
+from src.llm_runner import run_llm
 from src.loop_guard import LoopGuard
 from src.task_context import TaskContext
 from src.executor import execute_tool_call, _safe_parse_args, is_cancelled, MAX_ITERATIONS
@@ -14,9 +14,11 @@ _CODER_ALLOWED_TOOLS = {
     "read_file", "write_file", "create_spec",
     "git_pull", "git_push",
     # Serena tools para edición semántica
-    "read_file", "create_text_file", "replace_content",
+    "create_text_file", "replace_content",
     "find_file", "list_dir", "find_symbol",
     "insert_after_symbol", "replace_symbol_body",
+    # Codex CLI para implementación compleja
+    "codex_exec",
 }
 
 _CODER_TOOLS = [t for t in TOOLS if t["function"]["name"] in _CODER_ALLOWED_TOOLS]
@@ -37,7 +39,9 @@ Reglas estrictas:
 - Responde en español."""
 
 
-def run_coder(subtask: str, context: str = "", progress_callback=None) -> dict:
+def run_coder(subtask: str, context: str = "", progress_callback=None,
+              mode: str = "auto", manual_model_key: str | None = None,
+              repo_path: str | None = None) -> dict:
     """
     Ejecuta una subtarea de codificación con scope acotado.
     Retorna {"result": str, "modified_files": list, "status": str}
@@ -59,19 +63,33 @@ def run_coder(subtask: str, context: str = "", progress_callback=None) -> dict:
             ctx.finish("cancelled")
             return {"result": "⛔ Cancelado.", "modified_files": ctx.modified_files, "status": "cancelled"}
 
+        # Heartbeat: actualizar updated_at del run activo para que el watchdog sepa que sigue vivo
         try:
-            response = litellm.completion(
-                model=MODEL,
+            from src.run_state import _conn, _now
+            with _conn() as conn:
+                conn.execute("UPDATE run_states SET updated_at=? WHERE phase NOT IN ('done','failed') ORDER BY datetime(updated_at) DESC LIMIT 1", (_now(),))
+                conn.commit()
+        except Exception:
+            pass
+
+        try:
+            llm_result = run_llm(
                 messages=messages,
+                agent_role="coder",
                 tools=_CODER_TOOLS,
                 tool_choice="auto",
+                mode=mode,
+                manual_model_key=manual_model_key,
+                repo_path=repo_path,
             )
+            msg = llm_result.message
+            if progress_callback and iteration == 0:
+                progress_callback(f"🤖 [coder/{llm_result.model_used}] ejecutando...")
         except Exception as e:
             log.error("Error LLM coder: %s", e)
             ctx.finish("error", str(e))
             return {"result": f"Error: {e}", "modified_files": ctx.modified_files, "status": "error"}
 
-        msg = response.choices[0].message
         messages.append(msg.model_dump(exclude_none=True))
 
         if not msg.tool_calls:

@@ -51,7 +51,9 @@ def _parse_subtask_index(next_action: str) -> int:
         return 1
 
 
-def run_supervisor(user_message: str, progress_callback=None, existing_run_id: str | None = None, completed_subtasks: set[str] | None = None) -> str:
+def run_supervisor(user_message: str, progress_callback=None, existing_run_id: str | None = None,
+                   completed_subtasks: set[str] | None = None,
+                   mode: str = "auto", manual_model_key: str | None = None) -> str:
     state = SupervisorState(message=user_message)
     completed_subtasks = completed_subtasks or set()
     recovery = RecoveryAgent()
@@ -70,10 +72,18 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
         if progress_callback:
             progress_callback(msg)
 
+    def notify_agent(agent: str, msg: str):
+        from src.llm_selector import select_candidates
+        candidates = select_candidates(agent_role=agent, mode=mode, manual_model_key=manual_model_key)
+        model_label = candidates[0].key if candidates else "?"
+        notify(f"🤖 [{agent}/{model_label}] {msg}")
+
     run_id = existing_run_id or create_run_state(initial_phase="planning", source_message=user_message)
 
     try:
-        workspace = WorkspaceManager().create_or_get_workspace(run_id, user_message)
+        from src.workspace_context import get_active_repo_path
+        active_repo = get_active_repo_path()
+        workspace = WorkspaceManager(repo_path=active_repo).create_or_get_workspace(run_id, user_message)
         mark_validation_result(False, workspace["branch_name"])
         append_checkpoint(run_id, "workspace_ready", "planning", workspace)
         notify(f"🌿 Workspace listo en branch `{workspace['branch_name']}`")
@@ -86,8 +96,8 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
         if not state.record_agent_call("planner"):
             return "🔁 Loop detectado en planner. Abortando."
 
-        notify("📐 Planificando tarea...")
-        is_complex, spec_summary = plan_task(user_message)
+        notify_agent("planner", "Planificando tarea...")
+        is_complex, spec_summary, planner_model = plan_task(user_message, mode=mode, manual_model_key=manual_model_key)
         if not is_complex:
             return "__SIMPLE__"
 
@@ -96,15 +106,16 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
             append_checkpoint(run_id, "planning_ready", "planning", {"message": user_message[:200]})
 
         state.spec_summary = spec_summary
-        state.spec = generate_spec(user_message)
+        spec, _ = generate_spec(user_message, mode=mode, manual_model_key=manual_model_key)
+        state.spec = spec
         state.stage = "analyzing"
         update_run_state(run_id, phase="analyzing", next_action="analyze", spec=state.spec)
         append_checkpoint(run_id, "phase_analyzing", "analyzing", {"spec_summary": spec_summary[:300]})
         notify(spec_summary)
     else:
         if not state.spec:
-            _, state.spec_summary = plan_task(user_message)
-            state.spec = generate_spec(user_message)
+            _, state.spec_summary, _ = plan_task(user_message, mode=mode, manual_model_key=manual_model_key)
+            state.spec, _ = generate_spec(user_message, mode=mode, manual_model_key=manual_model_key)
             update_run_state(run_id, spec=state.spec)
         notify(f"🔄 Reanudando desde `{next_action}`")
 
@@ -120,8 +131,9 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
             append_event(run_id, "guardrail_triggered", "analyzing", {"agent": "analyst", "reason": "loop"})
             state.stage = "coding"
         else:
-            notify("🔍 Analizando codebase...")
-            state.analysis = analyze_codebase(user_message)
+            notify_agent("analyst", "Analizando codebase...")
+            state.analysis, analyst_model = analyze_codebase(user_message)
+            notify(f"🤖 [analyst/{analyst_model}] análisis completado")
             state.stage = "coding"
             update_run_state(run_id, phase="coding", next_action="code_subtask_1")
             append_event(run_id, "analysis_completed", "analyzing", {"summary": state.analysis[:300]})
@@ -138,6 +150,23 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
 
     start_index = _parse_subtask_index(next_action) if next_action.startswith("code_subtask_") else 1
     context = f"Spec:\n{state.spec_summary}\n\nAnálisis:\n{state.analysis}"
+
+    # Al reanudar desde una subtarea intermedia, incluir el diff actual para
+    # que el coder sepa qué ya fue implementado y no repita trabajo.
+    if start_index > 1:
+        try:
+            import subprocess
+            repo_path = workspace.get("repo_path", ".")
+            diff = subprocess.check_output(
+                ["git", "diff", "HEAD"], cwd=repo_path, text=True, timeout=10
+            )
+            status_out = subprocess.check_output(
+                ["git", "status", "--short"], cwd=repo_path, text=True, timeout=10
+            )
+            if diff or status_out:
+                context += f"\n\n⚠️ RESUME: cambios ya implementados en el repo (NO repetir):\n```\n{status_out}{diff[:1500]}\n```"
+        except Exception:
+            pass
 
     if next_action in ("planning", "analyze") or next_action.startswith("code_subtask_"):
         for i, subtask in enumerate(subtasks, 1):
@@ -159,12 +188,14 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
             strategy_used = "default"
             while True:
                 attempt_count += 1
-                notify(f"🔨 Subtarea {i}/{len(subtasks)} intento {attempt_count}: {subtask}")
+                notify_agent("coder", f"Subtarea {i}/{len(subtasks)} intento {attempt_count}:\n`{subtask}`")
                 update_run_state(run_id, current_subtask=subtask, current_subtask_index=i, next_action=f"code_subtask_{i}")
                 append_checkpoint(run_id, "subtask_started", "coding", {"subtask": subtask, "index": i, "total": len(subtasks), "attempt": attempt_count})
 
                 effective_context = context + f"\n\nRecovery strategy: {strategy_used}"
-                result = run_coder(subtask, context=effective_context, progress_callback=progress_callback)
+                result = run_coder(subtask, context=effective_context, progress_callback=progress_callback,
+                                   mode=mode, manual_model_key=manual_model_key,
+                                   repo_path=workspace.get("repo_path"))
                 state.modified_files.extend(result.get("modified_files", []))
                 append_modified_files(run_id, result.get("modified_files", []))
                 status = result.get("status", "unknown")
@@ -213,9 +244,10 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
             return "⛔ Cancelado antes del review."
 
         if state.record_agent_call("reviewer"):
-            notify("🔍 Revisando cambios...")
+            notify_agent("reviewer", "Revisando cambios...")
             criteria = state.spec.get("acceptance_criteria", [])
-            state.review = run_reviewer(state.spec_summary, state.modified_files, criteria)
+            state.review = run_reviewer(state.spec_summary, state.modified_files, criteria,
+                                        mode=mode, manual_model_key=manual_model_key)
             if state.review.get("verdict") in ("RECHAZADO", "PARCIAL"):
                 append_event(run_id, "review_rejected", "reviewing", {"verdict": state.review.get("verdict", "")})
             notify(format_review(state.review))
@@ -227,7 +259,7 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
     if state.modified_files and next_action in (
         "planning", "analyze", "review", "validate"
     ) or next_action.startswith("code_subtask_"):
-        notify("🔬 Ejecutando validación técnica...")
+        notify("🔬 [validator] Ejecutando validación técnica...")
         validation = run_validation(state.modified_files)
         append_validation(run_id, validation)
         mark_validation_result(bool(validation.get("passed")), workspace.get("branch_name", ""))

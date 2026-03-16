@@ -1,0 +1,337 @@
+"""
+Orquesta acciones según la intención clasificada.
+Maneja el flujo conversacional: setup → crear tareas → confirmar → ejecutar.
+"""
+from __future__ import annotations
+import logging
+import os
+from typing import Callable, Awaitable
+
+from src.intent_classifier import classify_intent
+from src.repo_resolver import resolve_repo_url, repo_name_from_url, default_branch
+from src.workspace_manager import WorkspaceManager, WORKSPACE_ROOT, _safe_repo_dir
+from src.workspace_context import set_active_repo_path
+from src.task_store import TaskStore
+from src.task_file_manager import TaskFileManager
+from src.work_item import WorkItem
+
+log = logging.getLogger("intent_handler")
+
+# Estado conversacional en memoria por chat_id
+# {"pending_tasks": [...], "pending_repo_path": str, "pending_ws": dict}
+_chat_state: dict[int, dict] = {}
+
+
+def get_chat_state(chat_id: int) -> dict:
+    return _chat_state.setdefault(chat_id, {})
+
+
+def clear_pending(chat_id: int):
+    _chat_state.pop(chat_id, None)
+
+
+def request_github_token(chat_id: int, pr_data: dict | None = None):
+    """Marca el estado para que el próximo mensaje del usuario sea interpretado como GITHUB_TOKEN."""
+    state = get_chat_state(chat_id)
+    state["pending_github_token"] = True
+    if pr_data:
+        state["pending_pr"] = pr_data
+
+
+async def handle_natural_message(
+    chat_id: int,
+    user_id: int,
+    message: str,
+    notify: Callable[[str], Awaitable],
+    run_task_fn: Callable[[str], Awaitable],  # ejecuta una tarea por id
+) -> bool:
+    """
+    Procesa un mensaje libre. Retorna True si fue manejado, False si debe
+    seguir el flujo normal de run_agent().
+    """
+    state = get_chat_state(chat_id)
+
+    # --- Token pendiente: el usuario está respondiendo con el GITHUB_TOKEN ---
+    if state.get("pending_github_token"):
+        token = message.strip()
+        if token and not token.startswith("/"):
+            import re
+            from pathlib import Path
+            os.environ["GITHUB_TOKEN"] = token
+            env_path = Path(__file__).parent.parent / ".env"
+            if env_path.exists():
+                text = env_path.read_text()
+                if "GITHUB_TOKEN=" in text:
+                    text = re.sub(r"GITHUB_TOKEN=.*", f"GITHUB_TOKEN={token}", text)
+                else:
+                    text += f"\nGITHUB_TOKEN={token}\n"
+                env_path.write_text(text)
+            state.pop("pending_github_token")
+            await notify("✅ GitHub token registrado. Reintentando el PR...")
+            # Reintentar PR si hay datos pendientes
+            if state.get("pending_pr"):
+                pr_data = state.pop("pending_pr")
+                from src.tools import create_github_pr
+                pr = create_github_pr(**pr_data)
+                if "url" in pr:
+                    await notify(f"🔀 PR creado: {pr['url']}")
+                else:
+                    await notify(f"⚠️ PR falló: {pr.get('error')}")
+            return True
+        else:
+            state.pop("pending_github_token", None)
+            await notify("❌ Token inválido, operación cancelada.")
+            return True
+
+    # --- Confirmación pendiente ---
+    if state.get("pending_tasks"):
+        intent = classify_intent(message)
+        if intent["intent"] == "confirm":
+            tasks = state.pop("pending_tasks")
+            ws = state.pop("pending_ws", {})
+            await notify(f"▶️ Ejecutando {len(tasks)} tarea(s)...")
+            for task_id in tasks:
+                await run_task_fn(task_id)
+            return True
+        elif intent["intent"] == "cancel":
+            clear_pending(chat_id)
+            await notify("❌ Cancelado. Las tareas quedaron en el backlog.")
+            return True
+        # Si no es confirm/cancel, procesar como nuevo mensaje
+
+    # --- Clasificar intención ---
+    intent = classify_intent(message)
+    log.info(f"[intent_handler] chat={chat_id} intent={intent}")
+    kind = intent.get("intent", "other")
+
+    if kind == "other":
+        return False  # delegar a run_agent normal
+
+    if kind == "query":
+        # Responder con estado real del backlog y run activo, sin crear workspace
+        try:
+            ws_data = WorkspaceManager().get_active_workspace(chat_id)
+        except Exception:
+            ws_data = None
+
+        lines = []
+        msg_lower = message.lower()
+
+        # Estado del run activo
+        from src.run_state import get_latest_active_run, get_run_state, list_recent_runs
+        active_run = get_latest_active_run()
+        if active_run:
+            active_run = get_run_state(active_run["run_id"])
+
+        # Pregunta sobre cambios/diff de una tarea específica
+        if active_run and any(w in msg_lower for w in ("cambio", "modific", "hiciste", "realizaste", "diff", "archivo")):
+            modified = active_run.get("modified_files", [])
+            phase = active_run.get("phase", "")
+            subtask = active_run.get("current_subtask", "")
+            idx = active_run.get("current_subtask_index", 0)
+            total = len(active_run.get("spec", {}).get("subtasks", []))
+            lines.append(f"📝 **Cambios en `{active_run.get('source_message','')[:50]}`**")
+            if phase not in ("done", "reviewing"):
+                lines.append(f"⏳ Tarea en progreso ({idx}/{total} subtareas) — los archivos se registran al completar cada subtarea.")
+                if subtask:
+                    lines.append(f"• Ejecutando ahora: `{subtask[:80]}`")
+            if modified:
+                lines.append("• Archivos modificados hasta ahora:")
+                for f in modified:
+                    lines.append(f"  - `{f}`")
+                if ws_data:
+                    try:
+                        import git as _git
+                        repo = _git.Repo(ws_data["repo_path"])
+                        diff = repo.git.diff("HEAD", "--stat")
+                        if diff:
+                            lines.append(f"\n```\n{diff[:800]}\n```")
+                    except Exception:
+                        pass
+            elif phase in ("done", "reviewing"):
+                lines.append("  Sin archivos modificados.")
+            await notify("\n".join(lines))
+            return True
+
+        # Estado de ejecución
+        if active_run and active_run.get("phase") not in ("done", "failed", None):
+            from datetime import datetime, timezone
+            updated_at = active_run.get("updated_at", "")
+            stale = False
+            stale_mins = 0
+            try:
+                last = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+                now = datetime.now(timezone.utc)
+                stale_mins = int((now - last).total_seconds() / 60)
+                stale = stale_mins > 3
+            except Exception:
+                pass
+
+            status_icon = "⚠️ INACTIVO" if stale else "⚙️ Activo"
+            lines.append(f"{status_icon} **Tarea en ejecución**")
+            lines.append(f"• Fase: `{active_run.get('phase')}`")
+            if active_run.get("current_subtask"):
+                lines.append(f"• Subtarea: `{active_run.get('current_subtask')}`")
+            idx = active_run.get("current_subtask_index", 0)
+            total = len(active_run.get("spec", {}).get("subtasks", []))
+            if total:
+                lines.append(f"• Progreso: {idx}/{total} subtareas")
+            if stale:
+                lines.append(f"• ⏱️ Sin actividad hace {stale_mins} min — puede estar bloqueado")
+                lines.append(f"• Usa /resume para reanudar o /stop para cancelar")
+
+        # Backlog de tareas
+        if ws_data:
+            store = TaskStore(ws_data["repo_path"])
+            items = store.list_items()
+            todo = [i for i in items if i.status == "todo"]
+            done = [i for i in items if i.status == "done"]
+            blocked = [i for i in items if i.status == "blocked"]
+            lines.append(f"\n📋 **Backlog** (`{repo_name_from_url(ws_data.get('repo_url', ws_data['repo_path']))}`)")
+            lines.append(f"• Pendientes: {len(todo)} | Completadas: {len(done)} | Bloqueadas: {len(blocked)}")
+            for t in todo[:5]:
+                lines.append(f"  - `{t.id}`: {t.title[:60]}")
+            if len(todo) > 5:
+                lines.append(f"  ... y {len(todo)-5} más")
+
+        if lines:
+            await notify("\n".join(lines))
+        else:
+            await notify("No hay workspace activo ni tareas en ejecución.")
+        return True
+
+    # --- run_task: ejecutar una tarea específica por ID ---
+    if kind == "run_task":
+        task_id = intent.get("task_id")
+        # Fallback: buscar patrón TASK-XXX en el mensaje original
+        if not task_id:
+            import re
+            m = re.search(r"TASK-\d+", message, re.IGNORECASE)
+            if m:
+                task_id = m.group(0).upper()
+        if not task_id:
+            await notify("⚠️ No pude identificar el ID de la tarea. Usa el formato `TASK-XXX`.")
+            return True
+        try:
+            ws_data = WorkspaceManager().get_active_workspace(chat_id)
+        except Exception:
+            ws_data = None
+        if not ws_data:
+            await notify("⚠️ No hay workspace activo.")
+            return True
+        set_active_repo_path(ws_data["repo_path"])
+        store = TaskStore(ws_data["repo_path"])
+        item = store.get_item(task_id)
+        if not item:
+            await notify(f"⚠️ No encontré `{task_id}` en el backlog.")
+            return True
+        await notify(f"▶️ Ejecutando `{task_id}`: {item.title}")
+        await run_task_fn(task_id)
+        return True
+
+    # --- do_next: ejecutar tareas pendientes del backlog activo ---
+    if kind == "do_next":
+        try:
+            ws_data = WorkspaceManager().get_active_workspace(chat_id)
+        except Exception:
+            ws_data = None
+        if not ws_data:
+            await notify("⚠️ No hay workspace activo.")
+            return True
+        set_active_repo_path(ws_data["repo_path"])
+        store = TaskStore(ws_data["repo_path"])
+        # Desbloquear tareas bloqueadas por error previo para reintentarlas
+        for item in store.list_items():
+            if item.status == "blocked":
+                store.update_status(item.id, "todo")
+        pending = [i for i in store.list_items() if i.status == "todo"]
+        if not pending:
+            await notify("✅ No hay tareas pendientes en el backlog.")
+            return True
+        item = pending[0]
+        remaining = len(pending) - 1
+        await notify(f"▶️ Ejecutando `{item.id}`: {item.title}" + (f"\n_(quedan {remaining} más en el backlog)_" if remaining else ""))
+        await run_task_fn(item.id)
+        return True
+
+    # --- Resolver repo si viene en el mensaje ---
+    ws = None
+    if intent.get("repo"):
+        try:
+            repo_url = resolve_repo_url(intent["repo"])
+            repo_name = repo_name_from_url(repo_url)
+            # Nunca usar main/master directamente — usar branch de trabajo
+            raw_branch = intent.get("branch") or ""
+            if not raw_branch or raw_branch.strip() in ("main", "master"):
+                work_branch = "agent/work"
+            else:
+                work_branch = raw_branch
+
+            await notify(f"🔧 Configurando workspace: `{repo_name}` (branch: `{work_branch}`)...")
+
+            import asyncio
+            loop = asyncio.get_event_loop()
+
+            def _setup():
+                wm = WorkspaceManager()
+                # Clonar/actualizar desde main, luego crear branch de trabajo
+                WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+                import git as _git
+                from pathlib import Path
+                repo_dir = WORKSPACE_ROOT / _safe_repo_dir(repo_url)
+                if (repo_dir / ".git").exists():
+                    repo = _git.Repo(str(repo_dir))
+                    repo.remotes.origin.fetch()
+                else:
+                    repo = _git.Repo.clone_from(repo_url, str(repo_dir))
+                # Crear branch de trabajo desde HEAD si no existe
+                if work_branch not in [b.name for b in repo.branches]:
+                    repo.create_head(work_branch)
+                repo.heads[work_branch].checkout()
+                return wm.set_active_workspace(chat_id, repo_url, "", work_branch)
+
+            ws = await loop.run_in_executor(None, _setup)
+            set_active_repo_path(ws["repo_path"])
+            await notify(f"✅ Workspace listo: `{repo_name}` en `{ws['active_branch']}`")
+        except Exception as e:
+            log.exception(f"[intent_handler] error setup repo: {e}")
+            await notify(f"❌ No pude configurar el repo: {e}")
+            return True
+    else:
+        # Usar workspace activo
+        try:
+            ws_data = WorkspaceManager().get_active_workspace(chat_id)
+            if ws_data:
+                ws = ws_data
+        except Exception:
+            pass
+
+    if not ws:
+        await notify("⚠️ No hay workspace activo. Dime el nombre del repo, por ejemplo: _trabaja en mi-repo_")
+        return True
+
+    # --- Crear tareas ---
+    tasks_text = intent.get("tasks", [])
+    if not tasks_text:
+        return True
+
+    repo_path = ws["repo_path"]
+    store = TaskStore(repo_path)
+    manager = TaskFileManager(repo_path)
+    created_ids = []
+
+    for title in tasks_text:
+        item = store.add_item(title=title, description="")
+        manager.create_task_file(item)
+        created_ids.append(item.id)
+
+    lines = [f"📋 Tareas creadas en `{repo_name_from_url(ws.get('repo_url', repo_path))}`:"]
+    for tid in created_ids:
+        task = store.get_item(tid)
+        lines.append(f"  • `{tid[:8]}`: {task.title if task else tid}")
+    lines.append("\n¿Ejecuto ahora? Responde *sí* o *no*")
+
+    state["pending_tasks"] = created_ids
+    state["pending_ws"] = ws
+    await notify("\n".join(lines))
+    return True

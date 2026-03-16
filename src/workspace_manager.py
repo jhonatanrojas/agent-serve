@@ -62,6 +62,16 @@ def _slug(text: str) -> str:
     return cleaned[:40] or "task"
 
 
+def _to_ssh_url(url: str) -> str:
+    """Convierte URL HTTPS de GitHub a SSH."""
+    if url.startswith("https://github.com/"):
+        ssh = url.replace("https://github.com/", "git@github.com:", 1)
+        if not ssh.endswith(".git"):
+            ssh += ".git"
+        return ssh
+    return url
+
+
 def _safe_repo_dir(repo_url: str) -> str:
     base = repo_url.rstrip("/").split("/")[-1].replace(".git", "")
     return _slug(base) or "repo"
@@ -111,7 +121,7 @@ class WorkspaceManager:
 
     def set_active_workspace(self, chat_id: str | int, repo_url: str, notion_database_id: str, branch: str) -> dict:
         _validate_no_main(branch)
-        repo_url = (repo_url or "").strip()
+        repo_url = _to_ssh_url((repo_url or "").strip())
         if not repo_url:
             raise WorkspaceError("repo_url es obligatorio")
 
@@ -124,6 +134,14 @@ class WorkspaceManager:
             repo = git.Repo.clone_from(repo_url, str(repo_dir))
 
         self._checkout_branch(repo, branch)
+
+        # Asegurar que .agent_tasks/ esté en .gitignore para no bloquear checkouts
+        gitignore = repo_dir / ".gitignore"
+        if not gitignore.exists() or ".agent_tasks" not in gitignore.read_text():
+            with gitignore.open("a") as f:
+                f.write("\n.agent_tasks/\n")
+            repo.index.add([".gitignore"])
+            repo.index.commit("chore: ignorar .agent_tasks (metadata del agente)")
 
         chat_key = str(chat_id)
         ts = _now()
@@ -214,8 +232,24 @@ class WorkspaceManager:
             return existing
 
         repo = git.Repo(str(self.repo_path))
-        if repo.is_dirty(untracked_files=True):
+        if repo.is_dirty(untracked_files=False):
             raise WorkspaceError("Repositorio con cambios sin commitear; no se puede crear branch de tarea.")
+
+        # Si estamos en una branch task/* anterior, volver a la base del workspace activo
+        current = repo.active_branch.name
+        if current.startswith("task/"):
+            # Buscar la base guardada en workspace_sessions
+            with _conn() as conn:
+                row = conn.execute(
+                    "SELECT active_branch FROM workspace_sessions WHERE repo_path=? LIMIT 1",
+                    (str(self.repo_path),),
+                ).fetchone()
+            base = (row[0] if row else None) or "agent/work"
+            target = base if base in [h.name for h in repo.heads] else (
+                "agent/work" if "agent/work" in [h.name for h in repo.heads] else None
+            )
+            if target:
+                repo.heads[target].checkout(force=True)
 
         base_branch = repo.active_branch.name
         short_run = run_id.split("-")[0]

@@ -7,10 +7,11 @@ TOOL_OUTPUT_LIMIT = int(os.getenv("AGENT_TOOL_OUTPUT_LIMIT", "2000"))
 
 _default_allow = {
     "git_pull", "git_push", "git_create_branch", "git_status", "git_diff_summary", "git_commit", "git_push_branch", "git_approve_push",
-    "create_spec", "read_file", "write_file",
+    "create_spec", "read_file", "write_file", "create_text_file", "replace_content", "codex_exec",
     "add_memory", "search_memory", "get_all_memories",
     "web_search", "sql_query", "list_tables",
     "schedule_task", "list_tasks", "remove_task",
+    "list_dir", "find_file", "find_symbol",
 }
 
 

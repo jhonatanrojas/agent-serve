@@ -1,7 +1,7 @@
 import os
 import logging
 from pathlib import Path
-import litellm
+from src.llm_runner import run_llm
 from src.workspace_context import get_active_repo_path
 from src.repomap import get_or_build_repo_map
 
@@ -67,8 +67,8 @@ Responde SOLO con JSON:
 }}"""
 
 
-def find_relevant_files(message: str, file_map: dict, repo_map: dict | None = None) -> list[str]:
-    """Usa RepoMap + LLM para identificar archivos relevantes para la tarea."""
+def find_relevant_files(message: str, file_map: dict, repo_map: dict | None = None) -> tuple[list[str], str]:
+    """Usa RepoMap + LLM para identificar archivos relevantes. Retorna (files, model_used)."""
     msg_lower = message.lower()
     if repo_map:
         candidates = []
@@ -77,27 +77,26 @@ def find_relevant_files(message: str, file_map: dict, repo_map: dict | None = No
             if any(tok in mod_l for tok in msg_lower.split()[:8]):
                 candidates.append(module)
         if candidates:
-            return sorted(set(candidates))[:8]
+            return sorted(set(candidates))[:8], "repomap"
 
     file_list = "\n".join(f"- {f} ({v['lines']} líneas)" for f, v in file_map.items())
     try:
-        response = litellm.completion(
-            model=MODEL,
+        result = run_llm(
             messages=[{"role": "user", "content": _RELEVANT_PROMPT.format(
                 file_list=file_list, message=message
             )}],
-            max_tokens=300,
+            agent_role="analyst",
+            require_tools=False,
         )
-        content = response.choices[0].message.content.strip()
+        content = result.message.content.strip()
         content = content.replace("```json", "").replace("```", "").strip()
         import json
         start, end = content.find("{"), content.rfind("}") + 1
         data = json.loads(content[start:end])
-        return data.get("relevant_files", [])
+        return data.get("relevant_files", []), result.model_used
     except Exception as e:
         log.warning("Error identificando archivos relevantes: %s", e)
-        # Fallback: retornar archivos Python del src/
-        return [f for f in file_map if f.startswith("src/") and f.endswith(".py")]
+        return [f for f in file_map if f.startswith("src/") and f.endswith(".py")], "?"
 
 
 def assess_impact(message: str, relevant_files: list[str]) -> dict:
@@ -109,14 +108,14 @@ def assess_impact(message: str, relevant_files: list[str]) -> dict:
 
     try:
         import json
-        response = litellm.completion(
-            model=MODEL,
+        result = run_llm(
             messages=[{"role": "user", "content": _IMPACT_PROMPT.format(
                 file_contents=file_contents, message=message
             )}],
-            max_tokens=400,
+            agent_role="analyst",
+            require_tools=False,
         )
-        content = response.choices[0].message.content.strip()
+        content = result.message.content.strip()
         content = content.replace("```json", "").replace("```", "").strip()
         start, end = content.find("{"), content.rfind("}") + 1
         return json.loads(content[start:end])
@@ -125,15 +124,15 @@ def assess_impact(message: str, relevant_files: list[str]) -> dict:
         return {"impact_level": "unknown", "affected_components": relevant_files}
 
 
-def analyze_codebase(message: str) -> str:
+def analyze_codebase(message: str) -> tuple[str, str]:
     """
     Punto de entrada principal. Usa RepoMap, identifica archivos relevantes
-    y evalúa impacto. Retorna un resumen legible. NO modifica archivos.
+    y evalúa impacto. Retorna (resumen_legible, model_used). NO modifica archivos.
     """
     log.info("Analizando codebase para: %s", message[:80])
     repo_map = get_or_build_repo_map(get_active_repo_path())
     file_map = scan_repo()
-    relevant = find_relevant_files(message, file_map, repo_map=repo_map)
+    relevant, model_used = find_relevant_files(message, file_map, repo_map=repo_map)
     impact = assess_impact(message, relevant)
 
     level = impact.get("impact_level", "unknown")
@@ -153,4 +152,4 @@ def analyze_codebase(message: str) -> str:
     if impact.get("recommendations"):
         lines.append("• Recomendaciones: " + "; ".join(impact["recommendations"]))
 
-    return "\n".join(lines)
+    return "\n".join(lines), model_used

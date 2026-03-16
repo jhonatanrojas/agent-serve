@@ -1,5 +1,8 @@
 import os
 import git
+import urllib.request
+import urllib.error
+import json as _json
 from pathlib import Path
 from src.notion import notion_mcp
 from src.serena import serena_mcp
@@ -88,9 +91,20 @@ def git_commit(message: str) -> str:
         return f"git commit error: {e}"
 
 
+def _ensure_ssh_remote(repo) -> None:
+    """Convierte la URL del remote origin a SSH si está en HTTPS."""
+    url = repo.remotes.origin.url
+    if url.startswith("https://github.com/"):
+        ssh_url = url.replace("https://github.com/", "git@github.com:", 1)
+        if not ssh_url.endswith(".git"):
+            ssh_url += ".git"
+        repo.remotes.origin.set_url(ssh_url)
+
+
 def git_push_branch(branch: str | None = None) -> str:
     try:
         repo = _repo()
+        _ensure_ssh_remote(repo)
         target = (branch or repo.active_branch.name).strip()
         ok, reason = can_push(target)
         if not ok:
@@ -112,6 +126,43 @@ def git_push(message: str) -> str:
     if not commit_result.startswith("git commit OK"):
         return commit_result
     return git_push_branch(None)
+
+
+def create_github_pr(title: str, body: str, head: str, base: str = "main") -> dict:
+    """Crea un PR en GitHub. Retorna {"url": ..., "number": ...} o {"error": ...}."""
+    token = os.getenv("GITHUB_TOKEN", "")
+    if not token:
+        return {"error": "GITHUB_TOKEN no configurado"}
+    try:
+        repo = _repo()
+        remote_url = repo.remotes.origin.url
+        # Normalizar SSH → HTTPS para parsear owner/repo
+        if remote_url.startswith("git@"):
+            # git@github.com:owner/repo.git → owner/repo
+            path = remote_url.split(":", 1)[-1].rstrip(".git")
+        else:
+            path = remote_url.rstrip("/").removesuffix(".git").split("github.com/", 1)[-1]
+        owner, repo_name = path.split("/", 1)
+
+        payload = _json.dumps({"title": title, "body": body, "head": f"{owner}:{head}", "base": base}).encode()
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{owner}/{repo_name}/pulls",
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "Content-Type": "application/json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = _json.loads(resp.read())
+            return {"url": data["html_url"], "number": data["number"]}
+    except urllib.error.HTTPError as e:
+        return {"error": f"GitHub API {e.code}: {e.read().decode()[:200]}"}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 def create_spec(title: str, content: str) -> str:
@@ -149,6 +200,35 @@ def write_file(path: str, content: str) -> str:
 
 
 # Tool definitions para LiteLLM
+def codex_exec(prompt: str, writable_paths: list[str] | None = None) -> str:
+    """Ejecuta una tarea de código con Codex CLI usando la sesión activa (~/.codex/auth.json)."""
+    import subprocess
+    repo_path = str(get_active_repo_path())
+    # Permisos: lectura total del disco + escritura en el repo
+    write_targets = writable_paths or [repo_path]
+    write_perms = ",".join(f'"{p}"' for p in write_targets)
+    cmd = [
+        "codex", "exec",
+        "-c", "sandbox_permissions=[\"disk-full-read-access\"]",
+        "-c", f'sandbox_permissions+=[{{"write-path":"{repo_path}"}}]',
+        prompt,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        return output[:2000] if output else "codex exec: sin output"
+    except subprocess.TimeoutExpired:
+        return "codex exec: timeout (120s)"
+    except Exception as e:
+        return f"codex exec error: {e}"
+
+
 TOOLS = [
     {
         "type": "function",
@@ -289,6 +369,7 @@ TOOLS = [
     {"type": "function", "function": {"name": "schedule_task", "description": "Programa una tarea recurrente con expresión cron", "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}, "cron_expr": {"type": "string", "description": "5 campos: minuto hora día mes día_semana. Ej: '0 9 * * 1' = lunes 9am"}, "command": {"type": "string"}}, "required": ["task_id", "cron_expr", "command"]}}},
     {"type": "function", "function": {"name": "list_tasks", "description": "Lista las tareas programadas", "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "remove_task", "description": "Elimina una tarea programada", "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}}},
+    {"type": "function", "function": {"name": "codex_exec", "description": "Ejecuta una tarea de implementación de código usando Codex CLI (sesión activa). Úsalo para subtareas de codificación complejas.", "parameters": {"type": "object", "properties": {"prompt": {"type": "string", "description": "Instrucción de implementación para Codex"}}, "required": ["prompt"]}}},
 ]
 
 def notion_tool(tool_name: str, arguments: dict) -> str:
@@ -343,6 +424,7 @@ TOOL_MAP = {
     "schedule_task": lambda args: schedule_task(args["task_id"], args["cron_expr"], args["command"]),
     "list_tasks": lambda args: list_tasks(),
     "remove_task": lambda args: remove_task(args["task_id"]),
+    "codex_exec": lambda args: codex_exec(args["prompt"], args.get("writable_paths")),
     **{name: lambda args, n=name: notion_tool(n, args) for name in _notion_tool_names},
     **{name: lambda args, n=name: serena_tool(n, args) for name in _serena_tool_names},
 }

@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 
 import git
-import litellm
+from src.llm_runner import run_llm
 from src.workspace_context import get_active_repo_path
 
 MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-chat")
@@ -101,7 +101,8 @@ def _normalize_review_result(result: dict) -> dict:
 
 
 def run_reviewer(spec_summary: str, modified_files: list[str],
-                 criteria: list[str] = None) -> dict:
+                 criteria: list[str] = None,
+                 mode: str = "auto", manual_model_key: str | None = None) -> dict:
     """
     Verifica si los cambios cumplen la spec, considerando contenido final + diff.
     Retorna JSON estructurado con lista de required_fixes.
@@ -124,17 +125,19 @@ def run_reviewer(spec_summary: str, modified_files: list[str],
     criteria_str = "\n".join(f"- {c}" for c in (criteria or ["Sin criterios definidos"]))
 
     try:
-        response = litellm.completion(
-            model=MODEL,
+        llm_result = run_llm(
             messages=[{"role": "user", "content": _REVIEW_PROMPT.format(
                 spec_summary=spec_summary,
                 diff_content=diff_content,
                 file_contents=file_contents,
                 criteria=criteria_str,
             )}],
-            max_tokens=700,
+            agent_role="reviewer",
+            require_tools=False,
+            mode=mode,
+            manual_model_key=manual_model_key,
         )
-        content = response.choices[0].message.content.strip()
+        content = llm_result.message.content.strip()
         content = content.replace("```json", "").replace("```", "").strip()
         start, end = content.find("{"), content.rfind("}") + 1
         result = json.loads(content[start:end])
