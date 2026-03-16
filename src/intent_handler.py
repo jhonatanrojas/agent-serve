@@ -9,7 +9,7 @@ from typing import Callable, Awaitable
 
 from src.intent_classifier import classify_intent
 from src.repo_resolver import resolve_repo_url, repo_name_from_url, default_branch
-from src.workspace_manager import WorkspaceManager
+from src.workspace_manager import WorkspaceManager, WORKSPACE_ROOT, _safe_repo_dir
 from src.workspace_context import set_active_repo_path
 from src.task_store import TaskStore
 from src.task_file_manager import TaskFileManager
@@ -76,14 +76,35 @@ async def handle_natural_message(
         try:
             repo_url = resolve_repo_url(intent["repo"])
             repo_name = repo_name_from_url(repo_url)
-            branch = intent.get("branch") or "main"
-            await notify(f"🔧 Configurando workspace: `{repo_name}` (branch: `{branch}`)...")
+            # Nunca usar main/master directamente — usar branch de trabajo
+            raw_branch = intent.get("branch") or ""
+            if not raw_branch or raw_branch.strip() in ("main", "master"):
+                work_branch = "agent/work"
+            else:
+                work_branch = raw_branch
+
+            await notify(f"🔧 Configurando workspace: `{repo_name}` (branch: `{work_branch}`)...")
 
             import asyncio
             loop = asyncio.get_event_loop()
 
             def _setup():
-                return WorkspaceManager().set_active_workspace(chat_id, repo_url, "", branch)
+                wm = WorkspaceManager()
+                # Clonar/actualizar desde main, luego crear branch de trabajo
+                WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+                import git as _git
+                from pathlib import Path
+                repo_dir = WORKSPACE_ROOT / _safe_repo_dir(repo_url)
+                if (repo_dir / ".git").exists():
+                    repo = _git.Repo(str(repo_dir))
+                    repo.remotes.origin.fetch()
+                else:
+                    repo = _git.Repo.clone_from(repo_url, str(repo_dir))
+                # Crear branch de trabajo desde HEAD si no existe
+                if work_branch not in [b.name for b in repo.branches]:
+                    repo.create_head(work_branch)
+                repo.heads[work_branch].checkout()
+                return wm.set_active_workspace(chat_id, repo_url, "", work_branch)
 
             ws = await loop.run_in_executor(None, _setup)
             set_active_repo_path(ws["repo_path"])
