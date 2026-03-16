@@ -32,7 +32,11 @@ def _conn() -> sqlite3.Connection:
             run_id TEXT PRIMARY KEY,
             source_message TEXT NOT NULL DEFAULT '',
             phase TEXT NOT NULL,
+            next_action TEXT NOT NULL DEFAULT 'planning',
             current_subtask TEXT,
+            current_subtask_index INTEGER NOT NULL DEFAULT 0,
+            spec TEXT NOT NULL DEFAULT '{}',
+            completed_subtasks TEXT NOT NULL DEFAULT '[]',
             modified_files TEXT NOT NULL DEFAULT '[]',
             validations TEXT NOT NULL DEFAULT '[]',
             events TEXT NOT NULL DEFAULT '[]',
@@ -44,8 +48,12 @@ def _conn() -> sqlite3.Connection:
         """
     )
     _ensure_column(conn, "run_states", "source_message", "source_message TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "run_states", "next_action", "next_action TEXT NOT NULL DEFAULT 'planning'")
     _ensure_column(conn, "run_states", "checkpoints", "checkpoints TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(conn, "run_states", "attempts", "attempts TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(conn, "run_states", "current_subtask_index", "current_subtask_index INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "run_states", "spec", "spec TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(conn, "run_states", "completed_subtasks", "completed_subtasks TEXT NOT NULL DEFAULT '[]'")
     conn.commit()
     return conn
 
@@ -100,12 +108,12 @@ def create_run_state(initial_phase: str = "planning", source_message: str = "") 
         conn.execute(
             """
             INSERT INTO run_states (
-                run_id, source_message, phase, current_subtask,
-                modified_files, validations, events, checkpoints, attempts,
+                run_id, source_message, phase, next_action, current_subtask, current_subtask_index,
+                spec, completed_subtasks, modified_files, validations, events, checkpoints, attempts,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (run_id, source_message, initial_phase, "", "[]", "[]", "[]", "[]", "[]", ts, ts),
+            (run_id, source_message, initial_phase, initial_phase, "", 0, "{}", "[]", "[]", "[]", "[]", "[]", "[]", ts, ts),
         )
         conn.commit()
     return run_id
@@ -116,7 +124,8 @@ def get_run_state(run_id: str) -> dict | None:
         row = conn.execute(
             """
             SELECT run_id, phase, current_subtask, modified_files,
-                   validations, events, checkpoints, attempts, source_message, created_at, updated_at
+                   validations, events, checkpoints, attempts, source_message, created_at, updated_at,
+                   next_action, current_subtask_index, spec, completed_subtasks
             FROM run_states
             WHERE run_id=?
             """,
@@ -138,6 +147,10 @@ def get_run_state(run_id: str) -> dict | None:
         "source_message": row[8] or "",
         "created_at": row[9],
         "updated_at": row[10],
+        "next_action": row[11] or "planning",
+        "current_subtask_index": int(row[12] or 0),
+        "spec": _loads(row[13], {}),
+        "completed_subtasks": _loads(row[14], []),
     }
 
 
@@ -146,7 +159,11 @@ def update_run_state(
     *,
     phase: str | None = None,
     source_message: str | None = None,
+    next_action: str | None = None,
     current_subtask: str | None = None,
+    current_subtask_index: int | None = None,
+    spec: dict | None = None,
+    completed_subtasks: list[str] | None = None,
     modified_files: list[str] | None = None,
     validations: list[dict] | None = None,
     events: list[dict] | None = None,
@@ -159,7 +176,11 @@ def update_run_state(
 
     next_phase = phase if phase is not None else current["phase"]
     next_source_message = source_message if source_message is not None else current["source_message"]
+    next_action_value = next_action if next_action is not None else current.get("next_action", "planning")
     next_subtask = current_subtask if current_subtask is not None else current["current_subtask"]
+    next_subtask_index = current_subtask_index if current_subtask_index is not None else current.get("current_subtask_index", 0)
+    next_spec = spec if spec is not None else current.get("spec", {})
+    next_completed_subtasks = completed_subtasks if completed_subtasks is not None else current.get("completed_subtasks", [])
     next_files = modified_files if modified_files is not None else current["modified_files"]
     next_validations = validations if validations is not None else current["validations"]
     next_events = events if events is not None else current["events"]
@@ -170,14 +191,18 @@ def update_run_state(
         conn.execute(
             """
             UPDATE run_states
-            SET phase=?, source_message=?, current_subtask=?, modified_files=?,
-                validations=?, events=?, checkpoints=?, attempts=?, updated_at=?
+            SET phase=?, source_message=?, next_action=?, current_subtask=?, current_subtask_index=?, spec=?,
+                completed_subtasks=?, modified_files=?, validations=?, events=?, checkpoints=?, attempts=?, updated_at=?
             WHERE run_id=?
             """,
             (
                 next_phase,
                 next_source_message,
+                next_action_value,
                 next_subtask,
+                next_subtask_index,
+                json.dumps(next_spec, ensure_ascii=False),
+                json.dumps(next_completed_subtasks, ensure_ascii=False),
                 json.dumps(next_files, ensure_ascii=False),
                 json.dumps(next_validations, ensure_ascii=False),
                 json.dumps(next_events, ensure_ascii=False),

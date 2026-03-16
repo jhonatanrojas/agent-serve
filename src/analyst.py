@@ -2,10 +2,10 @@ import os
 import logging
 from pathlib import Path
 from src.llm_runner import run_llm
+from src.workspace_context import get_active_repo_path
 from src.repomap import get_or_build_repo_map
 
 MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-chat")
-REPO_PATH = Path(os.getenv("REPO_PATH", "/root/agent-serve"))
 log = logging.getLogger("analyst")
 
 _IGNORE = {".git", "venv", "__pycache__", ".mem0", "node_modules", ".serena"}
@@ -15,11 +15,11 @@ _CODE_EXTS = {".py", ".js", ".ts", ".json", ".md", ".yaml", ".yml", ".toml", ".e
 def scan_repo() -> dict:
     """Escanea el repo y retorna estructura de archivos con tamaño."""
     files = {}
-    for path in REPO_PATH.rglob("*"):
+    for path in get_active_repo_path().rglob("*"):
         if any(part in _IGNORE for part in path.parts):
             continue
         if path.is_file() and path.suffix in _CODE_EXTS:
-            rel = str(path.relative_to(REPO_PATH))
+            rel = str(path.relative_to(get_active_repo_path()))
             try:
                 size = path.stat().st_size
                 files[rel] = {"size": size, "lines": len(path.read_text(errors="ignore").splitlines())}
@@ -31,7 +31,7 @@ def scan_repo() -> dict:
 def read_file_summary(rel_path: str, max_lines: int = 30) -> str:
     """Lee las primeras N líneas de un archivo para dar contexto al LLM."""
     try:
-        content = (REPO_PATH / rel_path).read_text(errors="ignore")
+        content = (get_active_repo_path() / rel_path).read_text(errors="ignore")
         lines = content.splitlines()
         preview = "\n".join(lines[:max_lines])
         if len(lines) > max_lines:
@@ -131,7 +131,7 @@ def analyze_codebase(message: str) -> str:
     y evalúa impacto. Retorna un resumen legible. NO modifica archivos.
     """
     log.info("Analizando codebase para: %s", message[:80])
-    repo_map = get_or_build_repo_map(REPO_PATH)
+    repo_map = get_or_build_repo_map(get_active_repo_path())
     file_map = scan_repo()
     relevant = find_relevant_files(message, file_map, repo_map=repo_map)
     impact = assess_impact(message, relevant)

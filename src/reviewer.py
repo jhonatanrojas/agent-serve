@@ -5,9 +5,9 @@ from pathlib import Path
 
 import git
 from src.llm_runner import run_llm
+from src.workspace_context import get_active_repo_path
 
 MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-chat")
-REPO_PATH = Path(os.getenv("REPO_PATH", "/root/agent-serve"))
 log = logging.getLogger("reviewer")
 
 _REVIEW_PROMPT = """Eres un revisor de código. Analiza si los cambios realizados cumplen los criterios de aceptación.
@@ -39,7 +39,7 @@ Responde SOLO con JSON:
 def _read_modified_files(modified_files: list[str]) -> str:
     contents = ""
     for rel_path in modified_files[:5]:
-        path = REPO_PATH / rel_path if not rel_path.startswith("/") else Path(rel_path)
+        path = get_active_repo_path() / rel_path if not rel_path.startswith("/") else Path(rel_path)
         try:
             text = path.read_text(errors="ignore")
             lines = text.splitlines()[:40]
@@ -54,7 +54,7 @@ def _read_modified_files(modified_files: list[str]) -> str:
 
 def _read_diff(modified_files: list[str]) -> str:
     try:
-        repo = git.Repo(str(REPO_PATH))
+        repo = git.Repo(str(get_active_repo_path()))
     except Exception as e:
         return f"No se pudo abrir repo git: {e}"
 

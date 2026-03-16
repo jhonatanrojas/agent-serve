@@ -2,21 +2,19 @@
 
 Este documento lista riesgos complejos detectados durante la evolución incremental del runtime.
 
-## 1) Reanudación granular por fase/subtarea (mitigado parcialmente)
+## 1) Reanudación granular por fase/subtarea (mitigado)
 
 **Estado actual**
 - `resume_run(run_id)` ahora reutiliza el mismo `run_id` y omite subtareas ya completadas (`subtask_completed`) para reducir retrabajo.
-- Aun así, el pipeline puede reevaluar etapas previas (planning/analysis) para reconstruir contexto.
+- La reanudación salta directo a la acción pendiente cuando existe estado canónico persistido.
 
-**Riesgo residual**
-- Continuidad no 100% exacta por punto de ejecución interno.
+**Mitigación aplicada**
+- Se persiste `next_action` por fase (`planning|analyze|code_subtask_i|review|validate|done`).
+- Se persiste `current_subtask_index`, `completed_subtasks` y `spec` para continuidad canónica.
+- `resume_run(run_id)` usa `next_action` y continúa desde la etapa pendiente sin rehacer todas las previas.
 
-**Plan de mitigación (tareas)**
-1. Persistir `next_action` explícito por fase (`analyze|code_subtask_i|review|validate`).
-2. Persistir índice de subtarea y subtareas completadas/pendientes de forma canónica.
-3. Extraer fases de supervisor en funciones reentrantes por etapa (entrada/salida determinística).
-4. Implementar `resume_run` para saltar directamente a la etapa pendiente sin recomputar previas.
-5. Añadir tests de integración para resume en cada fase.
+**Pendiente menor**
+- Añadir tests de integración fin-a-fin para reanudación en cada fase.
 
 ## 2) Crecimiento de estado JSON en SQLite (mitigado)
 

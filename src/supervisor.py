@@ -21,7 +21,7 @@ log = logging.getLogger("supervisor")
 
 Stage = Literal["planning", "analyzing", "coding", "reviewing", "done", "failed"]
 
-MAX_AGENT_LOOPS = 2  # máximo de veces que un agente puede reinvocarse sin progreso
+MAX_AGENT_LOOPS = 2
 
 
 @dataclass
@@ -37,41 +37,41 @@ class SupervisorState:
     errors: list = field(default_factory=list)
 
     def record_agent_call(self, agent: str) -> bool:
-        """Registra llamada a un agente. Retorna False si hay loop."""
         self.agent_call_counts[agent] = self.agent_call_counts.get(agent, 0) + 1
         return self.agent_call_counts[agent] <= MAX_AGENT_LOOPS
 
 
+def _parse_subtask_index(next_action: str) -> int:
+    if not next_action.startswith("code_subtask_"):
+        return 1
+    try:
+        idx = int(next_action.split("code_subtask_")[1])
+        return max(idx, 1)
+    except Exception:
+        return 1
+
+
 def run_supervisor(user_message: str, progress_callback=None, existing_run_id: str | None = None, completed_subtasks: set[str] | None = None) -> str:
-    """
-    Orquesta el flujo completo para tareas complejas.
-    Decide dinámicamente qué subagente invocar en cada paso.
-    """
     state = SupervisorState(message=user_message)
     completed_subtasks = completed_subtasks or set()
     recovery = RecoveryAgent()
     log.info("Supervisor iniciando: %s", user_message[:80])
+
+    existing_run = get_run_state(existing_run_id) if existing_run_id else None
+    if existing_run:
+        state.spec = existing_run.get("spec", {})
+        state.modified_files = existing_run.get("modified_files", [])
+        completed_subtasks.update(existing_run.get("completed_subtasks", []))
+
+    next_action = (existing_run or {}).get("next_action", "planning")
 
     def notify(msg: str):
         log.info("[supervisor] %s", msg[:100])
         if progress_callback:
             progress_callback(msg)
 
-    # ── Stage: planning ──────────────────────────────────────────────────────
-    if not state.record_agent_call("planner"):
-        return "🔁 Loop detectado en planner. Abortando."
-
-    notify("📐 Planificando tarea...")
-    is_complex, spec_summary = plan_task(user_message)
-
-    if not is_complex:
-        # No es compleja — el supervisor no debe intervenir
-        return "__SIMPLE__"
-
     run_id = existing_run_id or create_run_state(initial_phase="planning", source_message=user_message)
-    if existing_run_id is None:
-        append_event(run_id, "planning_started", "planning", {"message": user_message[:200]})
-        append_checkpoint(run_id, "planning_ready", "planning", {"message": user_message[:200]})
+
     try:
         workspace = WorkspaceManager().create_or_get_workspace(run_id, user_message)
         mark_validation_result(False, workspace["branch_name"])
@@ -81,137 +81,152 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
         append_event(run_id, "guardrail_triggered", "planning", {"agent": "workspace_manager", "reason": str(e)[:200]})
         return f"❌ No se pudo preparar workspace para la tarea: {e}"
 
-    state.spec_summary = spec_summary
-    state.spec = generate_spec(user_message)
-    state.stage = "analyzing"
-    update_run_state(run_id, phase="analyzing")
-    append_checkpoint(run_id, "phase_analyzing", "analyzing", {"spec_summary": spec_summary[:300]})
-    notify(spec_summary)
+    # planning
+    if next_action == "planning":
+        if not state.record_agent_call("planner"):
+            return "🔁 Loop detectado en planner. Abortando."
 
-    # ── Stage: analyzing ─────────────────────────────────────────────────────
-    if is_cancelled():
-        append_event(run_id, "run_paused", "analyzing", {"reason": "user_cancelled"})
-        append_checkpoint(run_id, "cancelled", "analyzing", {"reason": "user_cancelled"})
-        return "⛔ Cancelado."
+        notify("📐 Planificando tarea...")
+        is_complex, spec_summary = plan_task(user_message)
+        if not is_complex:
+            return "__SIMPLE__"
 
-    if not state.record_agent_call("analyst"):
-        state.errors.append("Loop en analyst")
-        append_event(run_id, "guardrail_triggered", "analyzing", {"agent": "analyst", "reason": "loop"})
-        state.stage = "coding"  # saltar análisis si hay loop
+        if existing_run_id is None:
+            append_event(run_id, "planning_started", "planning", {"message": user_message[:200]})
+            append_checkpoint(run_id, "planning_ready", "planning", {"message": user_message[:200]})
+
+        state.spec_summary = spec_summary
+        state.spec = generate_spec(user_message)
+        state.stage = "analyzing"
+        update_run_state(run_id, phase="analyzing", next_action="analyze", spec=state.spec)
+        append_checkpoint(run_id, "phase_analyzing", "analyzing", {"spec_summary": spec_summary[:300]})
+        notify(spec_summary)
     else:
-        notify("🔍 Analizando codebase...")
-        state.analysis = analyze_codebase(user_message)
-        state.stage = "coding"
-        update_run_state(run_id, phase="coding")
-        append_event(run_id, "analysis_completed", "analyzing", {"summary": state.analysis[:300]})
-        append_checkpoint(run_id, "phase_coding", "coding", {"analysis": state.analysis[:300]})
-        notify(state.analysis)
+        if not state.spec:
+            _, state.spec_summary = plan_task(user_message)
+            state.spec = generate_spec(user_message)
+            update_run_state(run_id, spec=state.spec)
+        notify(f"🔄 Reanudando desde `{next_action}`")
 
-    # ── Stage: coding ────────────────────────────────────────────────────────
+    # analyzing
+    if next_action in ("planning", "analyze"):
+        if is_cancelled():
+            append_event(run_id, "run_paused", "analyzing", {"reason": "user_cancelled"})
+            append_checkpoint(run_id, "cancelled", "analyzing", {"reason": "user_cancelled"})
+            return "⛔ Cancelado."
+
+        if not state.record_agent_call("analyst"):
+            state.errors.append("Loop en analyst")
+            append_event(run_id, "guardrail_triggered", "analyzing", {"agent": "analyst", "reason": "loop"})
+            state.stage = "coding"
+        else:
+            notify("🔍 Analizando codebase...")
+            state.analysis = analyze_codebase(user_message)
+            state.stage = "coding"
+            update_run_state(run_id, phase="coding", next_action="code_subtask_1")
+            append_event(run_id, "analysis_completed", "analyzing", {"summary": state.analysis[:300]})
+            append_checkpoint(run_id, "phase_coding", "coding", {"analysis": state.analysis[:300]})
+            notify(state.analysis)
+
     subtasks = state.spec.get("subtasks", [])
     if not subtasks:
         notify("⚠️ La spec no tiene subtareas definidas. Ejecutando como tarea simple.")
         state.stage = "done"
-        update_run_state(run_id, phase="done")
+        update_run_state(run_id, phase="done", next_action="done")
         append_checkpoint(run_id, "done_no_subtasks", "done", {})
         return "__SIMPLE__"
 
+    start_index = _parse_subtask_index(next_action) if next_action.startswith("code_subtask_") else 1
     context = f"Spec:\n{state.spec_summary}\n\nAnálisis:\n{state.analysis}"
 
-    for i, subtask in enumerate(subtasks, 1):
-        if subtask in completed_subtasks:
-            notify(f"⏭️ Subtarea {i} omitida (ya completada en run previo).")
-            append_checkpoint(run_id, "subtask_skipped_resume", "coding", {"subtask": subtask, "index": i})
-            continue
-
-        if is_cancelled():
-            append_event(run_id, "run_paused", "coding", {"reason": "user_cancelled"})
-            append_checkpoint(run_id, "cancelled", "coding", {"reason": "user_cancelled", "subtask": subtask})
-            return "⛔ Cancelado durante codificación."
-
-        if not state.record_agent_call(f"coder_{i}"):
-            notify(f"🔁 Loop detectado en coder subtarea {i}. Saltando.")
-            state.errors.append(f"Loop en coder subtarea {i}: {subtask}")
-            append_event(run_id, "guardrail_triggered", "coding", {"agent": f"coder_{i}", "reason": "loop", "subtask": subtask})
-            continue
-
-        attempt_count = 0
-        strategy_used = "default"
-
-        while True:
-            attempt_count += 1
-            notify(f"🔨 Subtarea {i}/{len(subtasks)} intento {attempt_count}: {subtask}")
-            update_run_state(run_id, current_subtask=subtask)
-            append_checkpoint(run_id, "subtask_started", "coding", {"subtask": subtask, "index": i, "total": len(subtasks), "attempt": attempt_count})
-
-            effective_context = context + f"\n\nRecovery strategy: {strategy_used}"
-            result = run_coder(subtask, context=effective_context, progress_callback=progress_callback)
-            state.modified_files.extend(result.get("modified_files", []))
-            append_modified_files(run_id, result.get("modified_files", []))
-            status = result.get("status", "unknown")
-
-            append_attempt(run_id, {
-                "subtask": subtask,
-                "attempt_count": attempt_count,
-                "strategy_used": strategy_used,
-                "resultado": status,
-            })
-
-            if status not in ("loop_detected", "error"):
-                append_checkpoint(run_id, "subtask_completed", "coding", {"subtask": subtask, "modified_files": result.get("modified_files", []), "attempt": attempt_count})
-                notify(f"✅ Subtarea {i} lista. Archivos: {result.get('modified_files', [])}")
-                break
-
-            state.errors.append(f"Subtarea {i} falló: {result.get('result', '')[:100]}")
-            append_event(run_id, "coding_failed", "coding", {"subtask": subtask, "status": status, "result": result.get("result", "")[:300], "attempt": attempt_count})
-            if status == "loop_detected":
-                append_event(run_id, "guardrail_triggered", "coding", {"agent": f"coder_{i}", "reason": "loop_detected", "subtask": subtask, "attempt": attempt_count})
-            append_checkpoint(run_id, "subtask_failed", "coding", {"subtask": subtask, "status": status, "attempt": attempt_count})
-
-            failure_type = recovery.classify_failure(status, result.get("result", ""))
-            decision = recovery.decide(failure_type, attempt_count)
-            strategy_used = decision.strategy
-
-            if decision.action == "retry":
-                notify(f"♻️ RecoveryAgent reintenta subtarea {i}: {decision.strategy} ({decision.reason})")
+    if next_action in ("planning", "analyze") or next_action.startswith("code_subtask_"):
+        for i, subtask in enumerate(subtasks, 1):
+            if i < start_index or subtask in completed_subtasks:
+                append_checkpoint(run_id, "subtask_skipped_resume", "coding", {"subtask": subtask, "index": i})
                 continue
 
-            notify(f"⏸️ RecoveryAgent pausó subtarea {i}: {decision.reason}")
-            append_event(run_id, "run_paused", "coding", {"subtask": subtask, "reason": decision.reason, "attempt": attempt_count})
-            append_checkpoint(run_id, "paused_by_recovery", "coding", {"subtask": subtask, "reason": decision.reason, "attempt": attempt_count})
-            return f"⏸️ Ejecución pausada por RecoveryAgent en subtarea {i}: {decision.reason}"
+            if is_cancelled():
+                append_event(run_id, "run_paused", "coding", {"reason": "user_cancelled"})
+                append_checkpoint(run_id, "cancelled", "coding", {"reason": "user_cancelled", "subtask": subtask})
+                return "⛔ Cancelado durante codificación."
 
-    state.modified_files = list(set(state.modified_files))
-    if state.modified_files:
-        refresh_repo_map(state.modified_files)
-    state.stage = "reviewing"
-    update_run_state(run_id, phase="reviewing", modified_files=state.modified_files, current_subtask="")
-    append_checkpoint(run_id, "phase_reviewing", "reviewing", {"modified_files": state.modified_files})
+            if not state.record_agent_call(f"coder_{i}"):
+                state.errors.append(f"Loop en coder subtarea {i}: {subtask}")
+                append_event(run_id, "guardrail_triggered", "coding", {"agent": f"coder_{i}", "reason": "loop", "subtask": subtask})
+                continue
 
-    # ── Stage: reviewing ─────────────────────────────────────────────────────
-    if is_cancelled():
-        append_event(run_id, "run_paused", "reviewing", {"reason": "user_cancelled"})
-        append_checkpoint(run_id, "cancelled", "reviewing", {"reason": "user_cancelled"})
-        return "⛔ Cancelado antes del review."
+            attempt_count = 0
+            strategy_used = "default"
+            while True:
+                attempt_count += 1
+                notify(f"🔨 Subtarea {i}/{len(subtasks)} intento {attempt_count}: {subtask}")
+                update_run_state(run_id, current_subtask=subtask, current_subtask_index=i, next_action=f"code_subtask_{i}")
+                append_checkpoint(run_id, "subtask_started", "coding", {"subtask": subtask, "index": i, "total": len(subtasks), "attempt": attempt_count})
 
-    if not state.record_agent_call("reviewer"):
-        notify("🔁 Loop en reviewer. Saltando revisión.")
-        append_event(run_id, "guardrail_triggered", "reviewing", {"agent": "reviewer", "reason": "loop"})
-    else:
-        notify("🔍 Revisando cambios...")
-        criteria = state.spec.get("acceptance_criteria", [])
-        state.review = run_reviewer(state.spec_summary, state.modified_files, criteria)
-        if state.review.get("verdict") in ("RECHAZADO", "PARCIAL"):
-            append_event(run_id, "review_rejected", "reviewing", {"verdict": state.review.get("verdict", ""), "issues": state.review.get("issues", [])[:5], "required_fixes": state.review.get("required_fixes", [])[:5]})
-        review_msg = format_review(state.review)
-        notify(review_msg)
+                effective_context = context + f"\n\nRecovery strategy: {strategy_used}"
+                result = run_coder(subtask, context=effective_context, progress_callback=progress_callback)
+                state.modified_files.extend(result.get("modified_files", []))
+                append_modified_files(run_id, result.get("modified_files", []))
+                status = result.get("status", "unknown")
+                append_attempt(run_id, {
+                    "subtask": subtask,
+                    "attempt_count": attempt_count,
+                    "strategy_used": strategy_used,
+                    "resultado": status,
+                })
 
-    state.stage = "done"
-    update_run_state(run_id, phase="done")
-    append_checkpoint(run_id, "phase_done", "done", {})
+                if status not in ("loop_detected", "error"):
+                    completed_subtasks.add(subtask)
+                    append_checkpoint(run_id, "subtask_completed", "coding", {"subtask": subtask, "modified_files": result.get("modified_files", []), "attempt": attempt_count})
+                    update_run_state(
+                        run_id,
+                        completed_subtasks=sorted(completed_subtasks),
+                        next_action=f"code_subtask_{i + 1}" if i < len(subtasks) else "review",
+                    )
+                    break
 
-    # ── Validación técnica ───────────────────────────────────────────────────
-    if state.modified_files:
+                state.errors.append(f"Subtarea {i} falló: {result.get('result', '')[:100]}")
+                append_event(run_id, "coding_failed", "coding", {"subtask": subtask, "status": status, "result": result.get("result", "")[:300], "attempt": attempt_count})
+                append_checkpoint(run_id, "subtask_failed", "coding", {"subtask": subtask, "status": status, "attempt": attempt_count})
+
+                failure_type = recovery.classify_failure(status, result.get("result", ""))
+                decision = recovery.decide(failure_type, attempt_count)
+                strategy_used = decision.strategy
+                if decision.action == "retry":
+                    continue
+
+                append_event(run_id, "run_paused", "coding", {"subtask": subtask, "reason": decision.reason, "attempt": attempt_count})
+                append_checkpoint(run_id, "paused_by_recovery", "coding", {"subtask": subtask, "reason": decision.reason, "attempt": attempt_count})
+                return f"⏸️ Ejecución pausada por RecoveryAgent en subtarea {i}: {decision.reason}"
+
+        state.modified_files = list(set(state.modified_files))
+        if state.modified_files:
+            refresh_repo_map(state.modified_files)
+        state.stage = "reviewing"
+        update_run_state(run_id, phase="reviewing", next_action="review", modified_files=state.modified_files, current_subtask="")
+        append_checkpoint(run_id, "phase_reviewing", "reviewing", {"modified_files": state.modified_files})
+
+    if next_action in ("planning", "analyze") or next_action.startswith("code_subtask_") or next_action == "review":
+        if is_cancelled():
+            append_event(run_id, "run_paused", "reviewing", {"reason": "user_cancelled"})
+            append_checkpoint(run_id, "cancelled", "reviewing", {"reason": "user_cancelled"})
+            return "⛔ Cancelado antes del review."
+
+        if state.record_agent_call("reviewer"):
+            notify("🔍 Revisando cambios...")
+            criteria = state.spec.get("acceptance_criteria", [])
+            state.review = run_reviewer(state.spec_summary, state.modified_files, criteria)
+            if state.review.get("verdict") in ("RECHAZADO", "PARCIAL"):
+                append_event(run_id, "review_rejected", "reviewing", {"verdict": state.review.get("verdict", "")})
+            notify(format_review(state.review))
+
+        state.stage = "done"
+        update_run_state(run_id, phase="done", next_action="validate")
+        append_checkpoint(run_id, "phase_done", "done", {})
+
+    if state.modified_files and next_action in (
+        "planning", "analyze", "review", "validate"
+    ) or next_action.startswith("code_subtask_"):
         notify("🔬 Ejecutando validación técnica...")
         validation = run_validation(state.modified_files)
         append_validation(run_id, validation)
@@ -219,13 +234,13 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
         if validation.get("passed"):
             append_event(run_id, "validation_passed", "done", {"checks": len(validation.get("checks", []))})
             append_checkpoint(run_id, "validation_passed", "done", {"checks": len(validation.get("checks", []))})
-        validation_msg = format_validation(validation)
-        notify(validation_msg)
+        notify(format_validation(validation))
     else:
         validation = {"passed": True}
         mark_validation_result(True, workspace.get("branch_name", ""))
 
-    # ── Resumen final ────────────────────────────────────────────────────────
+    update_run_state(run_id, phase="done", next_action="done", current_subtask="", current_subtask_index=0)
+
     verdict = state.review.get("verdict", "SIN REVIEW")
     lines = [
         "🏁 **Tarea completada**",
@@ -236,46 +251,19 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
         f"• Review: {verdict}",
         f"• Validación: {'✅ OK' if validation.get('passed') else '⚠️ Con errores'}",
     ]
-    if state.errors:
-        lines.append(f"• ⚠️ Errores: {'; '.join(state.errors)}")
-
     return "\n".join(lines)
 
 
-def _infer_last_completed_phase(run_data: dict) -> str:
-    """Infiere la última fase completada usando fase actual y checkpoints."""
-    checkpoints = run_data.get("checkpoints", [])
-    labels = {cp.get("label", "") for cp in checkpoints if isinstance(cp, dict)}
-    current_phase = run_data.get("phase", "planning")
-
-    if "validation_passed" in labels:
-        return "done"
-    if "phase_done" in labels:
-        return "reviewing"
-    if "phase_reviewing" in labels:
-        return "coding"
-    if "phase_coding" in labels:
-        return "analyzing"
-    if "phase_analyzing" in labels:
-        return "planning"
-    return current_phase
-
-
 def resume_run(run_id: str, progress_callback=None) -> str:
-    """
-    Reanuda una corrida previa a partir de su contexto persistido.
-    Implementación incremental: retoma por fase detectada y reejecuta pipeline.
-    """
     run_data = get_run_state(run_id)
     if not run_data:
         return f"❌ No existe run_id: {run_id}"
 
-    if run_data.get("phase") == "done":
+    if run_data.get("phase") == "done" and run_data.get("next_action") in ("done", ""):
         return f"✅ La corrida `{run_id}` ya está completada."
 
     source_message = run_data.get("source_message", "")
     if not source_message:
-        source_message = ""
         for ev in run_data.get("events", []):
             details = ev.get("details", {}) if isinstance(ev, dict) else {}
             if isinstance(details, dict) and details.get("message"):
@@ -285,25 +273,18 @@ def resume_run(run_id: str, progress_callback=None) -> str:
     if not source_message:
         return f"❌ No se pudo recuperar el mensaje original para reanudar `{run_id}`."
 
-    phase = _infer_last_completed_phase(run_data)
-    append_event(run_id, "run_resumed", phase, {"resume_run_id": run_id})
-    append_checkpoint(run_id, "resumed", phase, {"resume_run_id": run_id})
-
-    completed_subtasks = {
-        cp.get("data", {}).get("subtask", "")
-        for cp in run_data.get("checkpoints", [])
-        if isinstance(cp, dict) and cp.get("label") == "subtask_completed"
-    }
-    completed_subtasks.discard("")
+    next_action = run_data.get("next_action", "planning")
+    append_event(run_id, "run_resumed", run_data.get("phase", "planning"), {"resume_run_id": run_id, "next_action": next_action})
+    append_checkpoint(run_id, "resumed", run_data.get("phase", "planning"), {"resume_run_id": run_id, "next_action": next_action})
 
     resumed_result = run_supervisor(
         source_message,
         progress_callback,
         existing_run_id=run_id,
-        completed_subtasks=completed_subtasks,
+        completed_subtasks=set(run_data.get("completed_subtasks", [])),
     )
     return (
-        f"🔄 Reanudación iniciada desde fase `{phase}` para `{run_id}`.\n"
-        "ℹ️ Se ejecutó una continuación segura del pipeline con el contexto persistido.\n\n"
+        f"🔄 Reanudación iniciada desde acción `{next_action}` para `{run_id}`.\n"
+        "ℹ️ Se continuó la corrida usando estado persistido por fase/subtarea.\n\n"
         f"{resumed_result}"
     )
