@@ -101,7 +101,8 @@ def _normalize_review_result(result: dict) -> dict:
 
 
 def run_reviewer(spec_summary: str, modified_files: list[str],
-                 criteria: list[str] = None) -> dict:
+                 criteria: list[str] = None,
+                 mode: str = "auto", manual_model_key: str | None = None) -> dict:
     """
     Verifica si los cambios cumplen la spec, considerando contenido final + diff.
     Retorna JSON estructurado con lista de required_fixes.
@@ -133,6 +134,8 @@ def run_reviewer(spec_summary: str, modified_files: list[str],
             )}],
             agent_role="reviewer",
             require_tools=False,
+            mode=mode,
+            manual_model_key=manual_model_key,
         )
         content = llm_result.message.content.strip()
         content = content.replace("```json", "").replace("```", "").strip()

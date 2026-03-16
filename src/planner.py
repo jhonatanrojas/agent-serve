@@ -43,9 +43,8 @@ Responde SOLO con un JSON con esta estructura:
 Tarea: {message}"""
 
 
-def classify_task(message: str) -> dict:
+def classify_task(message: str, mode: str = "auto", manual_model_key: str | None = None) -> dict:
     """Retorna {"complexity": "simple"} o {"complexity": "complex", "reason": "..."}"""
-    # Clasificación rápida por palabras clave antes de llamar al LLM
     msg_lower = message.lower()
     if any(signal in msg_lower for signal in _COMPLEX_SIGNALS):
         log.info("Tarea clasificada como compleja por palabras clave")
@@ -56,9 +55,10 @@ def classify_task(message: str) -> dict:
             messages=[{"role": "user", "content": _CLASSIFY_PROMPT.format(message=message)}],
             agent_role="planner",
             require_tools=False,
+            mode=mode,
+            manual_model_key=manual_model_key,
         )
         content = result.message.content.strip()
-        # Limpiar posibles bloques de código markdown
         content = content.replace("```json", "").replace("```", "").strip()
         start = content.find("{")
         end = content.rfind("}") + 1
@@ -68,13 +68,15 @@ def classify_task(message: str) -> dict:
         return {"complexity": "simple"}
 
 
-def generate_spec(message: str) -> dict:
+def generate_spec(message: str, mode: str = "auto", manual_model_key: str | None = None) -> dict:
     """Llama al LLM para generar una spec estructurada."""
     try:
         result = run_llm(
             messages=[{"role": "user", "content": _SPEC_PROMPT.format(message=message)}],
             agent_role="planner",
             require_tools=False,
+            mode=mode,
+            manual_model_key=manual_model_key,
         )
         content = result.message.content.strip()
         content = content.replace("```json", "").replace("```", "").strip()
@@ -117,17 +119,17 @@ def save_spec(spec: dict) -> str:
     return str(path)
 
 
-def plan_task(message: str) -> tuple[bool, str]:
+def plan_task(message: str, mode: str = "auto", manual_model_key: str | None = None) -> tuple[bool, str]:
     """
     Evalúa la tarea. Si es compleja, genera y guarda spec.
     Retorna (is_complex, spec_summary_or_empty).
     """
-    classification = classify_task(message)
+    classification = classify_task(message, mode=mode, manual_model_key=manual_model_key)
     if classification.get("complexity") != "complex":
         return False, ""
 
     log.info("Tarea compleja detectada. Generando spec...")
-    spec = generate_spec(message)
+    spec = generate_spec(message, mode=mode, manual_model_key=manual_model_key)
     path = save_spec(spec)
 
     summary = (

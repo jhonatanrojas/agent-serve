@@ -51,7 +51,9 @@ def _parse_subtask_index(next_action: str) -> int:
         return 1
 
 
-def run_supervisor(user_message: str, progress_callback=None, existing_run_id: str | None = None, completed_subtasks: set[str] | None = None) -> str:
+def run_supervisor(user_message: str, progress_callback=None, existing_run_id: str | None = None,
+                   completed_subtasks: set[str] | None = None,
+                   mode: str = "auto", manual_model_key: str | None = None) -> str:
     state = SupervisorState(message=user_message)
     completed_subtasks = completed_subtasks or set()
     recovery = RecoveryAgent()
@@ -87,7 +89,7 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
             return "🔁 Loop detectado en planner. Abortando."
 
         notify("📐 Planificando tarea...")
-        is_complex, spec_summary = plan_task(user_message)
+        is_complex, spec_summary = plan_task(user_message, mode=mode, manual_model_key=manual_model_key)
         if not is_complex:
             return "__SIMPLE__"
 
@@ -96,15 +98,15 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
             append_checkpoint(run_id, "planning_ready", "planning", {"message": user_message[:200]})
 
         state.spec_summary = spec_summary
-        state.spec = generate_spec(user_message)
+        state.spec = generate_spec(user_message, mode=mode, manual_model_key=manual_model_key)
         state.stage = "analyzing"
         update_run_state(run_id, phase="analyzing", next_action="analyze", spec=state.spec)
         append_checkpoint(run_id, "phase_analyzing", "analyzing", {"spec_summary": spec_summary[:300]})
         notify(spec_summary)
     else:
         if not state.spec:
-            _, state.spec_summary = plan_task(user_message)
-            state.spec = generate_spec(user_message)
+            _, state.spec_summary = plan_task(user_message, mode=mode, manual_model_key=manual_model_key)
+            state.spec = generate_spec(user_message, mode=mode, manual_model_key=manual_model_key)
             update_run_state(run_id, spec=state.spec)
         notify(f"🔄 Reanudando desde `{next_action}`")
 
@@ -164,7 +166,8 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
                 append_checkpoint(run_id, "subtask_started", "coding", {"subtask": subtask, "index": i, "total": len(subtasks), "attempt": attempt_count})
 
                 effective_context = context + f"\n\nRecovery strategy: {strategy_used}"
-                result = run_coder(subtask, context=effective_context, progress_callback=progress_callback)
+                result = run_coder(subtask, context=effective_context, progress_callback=progress_callback,
+                                   mode=mode, manual_model_key=manual_model_key)
                 state.modified_files.extend(result.get("modified_files", []))
                 append_modified_files(run_id, result.get("modified_files", []))
                 status = result.get("status", "unknown")
@@ -215,7 +218,8 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
         if state.record_agent_call("reviewer"):
             notify("🔍 Revisando cambios...")
             criteria = state.spec.get("acceptance_criteria", [])
-            state.review = run_reviewer(state.spec_summary, state.modified_files, criteria)
+            state.review = run_reviewer(state.spec_summary, state.modified_files, criteria,
+                                        mode=mode, manual_model_key=manual_model_key)
             if state.review.get("verdict") in ("RECHAZADO", "PARCIAL"):
                 append_event(run_id, "review_rejected", "reviewing", {"verdict": state.review.get("verdict", "")})
             notify(format_review(state.review))

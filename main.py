@@ -97,6 +97,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     ws = _set_workspace_context(update.effective_chat.id)
     user_text = update.message.text
+    pref = get_preference(update.effective_chat.id)
     await update.message.reply_text(f"🤖 Procesando en `{ws['repo_path']}`...", **_no_preview_kwargs())
 
     loop = asyncio.get_event_loop()
@@ -105,7 +106,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, **_no_preview_kwargs())
 
     def run_sync():
-        return run_agent(user_text, lambda m: asyncio.run_coroutine_threadsafe(progress(m), loop))
+        return run_agent(user_text, lambda m: asyncio.run_coroutine_threadsafe(progress(m), loop),
+                         mode=pref["mode"], manual_model_key=pref["model_key"])
 
     _current_task = loop.run_in_executor(None, run_sync)
     context.application.create_task(_watch_current_task(update, _current_task))
@@ -180,10 +182,12 @@ async def handle_do_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         manager.update_task_file(WorkItem.from_dict({**task.to_dict(), "status": "in_progress"}), "Inicio de ejecución")
     await update.message.reply_text(f"🚀 Ejecutando tarea {task.id[:8]} en branch `{branch}`", **_no_preview_kwargs())
     loop = asyncio.get_event_loop()
+    pref = get_preference(update.effective_chat.id)
 
     def run_sync():
         try:
-            return run_supervisor(f"{task.title}\n\n{task.description}")
+            return run_supervisor(f"{task.title}\n\n{task.description}",
+                                  mode=pref["mode"], manual_model_key=pref["model_key"])
         finally:
             pass
 
