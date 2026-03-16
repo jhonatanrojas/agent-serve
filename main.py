@@ -707,6 +707,27 @@ async def handle_setkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+async def handle_setghtoken(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ALLOWED_USER:
+        return
+    if not context.args:
+        await update.message.reply_text("Uso: `/setghtoken <token>`", parse_mode="Markdown", **_no_preview_kwargs())
+        return
+    token = context.args[0].strip()
+    os.environ["GITHUB_TOKEN"] = token
+    # Persistir en .env
+    env_path = Path(__file__).parent / ".env"
+    if env_path.exists():
+        text = env_path.read_text()
+        if "GITHUB_TOKEN=" in text:
+            import re
+            text = re.sub(r"GITHUB_TOKEN=.*", f"GITHUB_TOKEN={token}", text)
+        else:
+            text += f"\nGITHUB_TOKEN={token}\n"
+        env_path.write_text(text)
+    await update.message.reply_text("✅ `GITHUB_TOKEN` configurado y guardado.", parse_mode="Markdown", **_no_preview_kwargs())
+
+
 _HELP_TEXT = """🤖 *Comandos disponibles*
 
 *Inicio*
@@ -746,6 +767,7 @@ _HELP_TEXT = """🤖 *Comandos disponibles*
 /modelstats — métricas de uso por modelo
 /addmodel key=<k> model=<p/m> env=<VAR> key\_val=<val> — registra modelo nuevo
 /setkey <ENV\_VAR> <valor> — configura API key en memoria
+/setghtoken <token> — configura GitHub token para push y PRs automáticos
 /codexkey <api\_key> — autentica Codex CLI con API key
 /codexlogin — inicia device flow de Codex CLI (sin browser en servidor)"""
 
@@ -883,6 +905,7 @@ def main():
     _bot_app.add_handler(CommandHandler("help", handle_help))
     _bot_app.add_handler(CommandHandler("addmodel", handle_addmodel))
     _bot_app.add_handler(CommandHandler("setkey", handle_setkey))
+    _bot_app.add_handler(CommandHandler("setghtoken", handle_setghtoken))
     _bot_app.add_handler(CommandHandler("codexlogin", handle_codexlogin))
     _bot_app.add_handler(CommandHandler("codexkey", handle_codexkey))
     _bot_app.add_handler(CommandHandler("codexstatus", handle_codexstatus))
