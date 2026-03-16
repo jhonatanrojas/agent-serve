@@ -92,9 +92,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global _current_task
     if update.effective_user.id != ALLOWED_USER:
         return
-    if _current_task and not _current_task.done():
-        await update.message.reply_text("⏳ Ya hay una tarea en ejecución. Usa /stop para cancelarla.", **_no_preview_kwargs())
-        return
 
     ws = _set_workspace_context(update.effective_chat.id)
     user_text = update.message.text
@@ -104,6 +101,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     async def notify(msg):
         await update.message.reply_text(msg, **_no_preview_kwargs())
+
+    # --- Si hay tarea activa, solo permitir consultas de estado y stop ---
+    if _current_task and not _current_task.done():
+        from src.intent_classifier import classify_intent
+        from src.intent_handler import handle_natural_message as _hnm
+        intent = classify_intent(user_text)
+        if intent.get("intent") in ("query", "other"):
+            # Responder consulta de estado sin interrumpir la tarea
+            from src.agent import run_agent_loop, build_system_prompt, load_memory
+            from src.loop_guard import LoopGuard
+            from src.task_context import TaskContext
+            from src.run_state import get_run_state
+            ctx = TaskContext(message=user_text)
+            memories = load_memory(user_text)
+            system = build_system_prompt(memories)
+            # Enriquecer con estado del run activo
+            if _current_run_id:
+                run_data = get_run_state(_current_run_id)
+                if run_data:
+                    system += f"\n\nTarea en ejecución: fase={run_data.get('phase')}, subtarea={run_data.get('current_subtask','')}"
+            messages = [{"role": "system", "content": system}, {"role": "user", "content": user_text}]
+            def _query_sync():
+                return run_agent_loop(messages, ctx, LoopGuard(), mode=pref["mode"], manual_model_key=pref["model_key"])
+            result = await loop.run_in_executor(None, _query_sync)
+            await notify(result)
+            return
+        # Manejar pending_token aunque haya tarea activa
+        from src.intent_handler import handle_natural_message as _hnm2, get_chat_state
+        if get_chat_state(chat_id).get("pending_github_token"):
+            await _hnm2(chat_id=chat_id, user_id=update.effective_user.id, message=user_text, notify=notify, run_task_fn=lambda _: None)
+            return
+        await update.message.reply_text("⏳ Tarea en ejecución. Puedes preguntarme el estado o usar /stop para cancelar.", **_no_preview_kwargs())
+        return
 
     async def run_task_by_id(task_id: str):
         from src.task_store import TaskStore
@@ -121,49 +151,59 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         def run_sync():
             return run_supervisor(f"{task.title}\n\n{task.description or ''}",
                                   mode=pref["mode"], manual_model_key=pref["model_key"])
-        result = await loop.run_in_executor(None, run_sync)
-        await notify(result[:1000] if result else "✅ Tarea completada.")
+        global _current_task, _current_run_id
+        _current_task = loop.run_in_executor(None, run_sync)
 
-        # --- Push + PR al finalizar ---
-        def _push_and_pr():
-            import git as _git
-            repo = _git.Repo(str(ws_now["repo_path"]))
-            branch = repo.active_branch.name
-            # Commit si hay cambios
-            repo.git.add(A=True)
-            if repo.is_dirty(untracked_files=False) or repo.index.diff("HEAD"):
-                repo.index.commit(f"feat({task.id}): {task.title}")
-            # Push (aprobar + push)
-            approve_push(branch)
-            push_result = git_push_branch(branch)
-            if "error" in push_result.lower():
-                return push_result, {"error": push_result, "head": branch}
-            # Crear PR
-            pr = create_github_pr(
-                title=f"[{task.id}] {task.title}",
-                body=f"## Resumen\n\n{result[:2000] if result else 'Tarea completada por el agente.'}\n\n---\n_PR generado automáticamente por agent-serve_",
-                head=branch,
-                base="main",
-            )
-            pr["head"] = branch
-            return push_result, pr
+        async def _finish_task(fut):
+            global _current_task, _current_run_id
+            try:
+                result = await fut
+                maybe_run = _extract_run_id(result)
+                if maybe_run:
+                    _current_run_id = maybe_run
+                await notify(result[:1000] if result else "✅ Tarea completada.")
 
-        push_res, pr = await loop.run_in_executor(None, _push_and_pr)
-        if pr and "url" in pr:
-            await notify(f"🔀 PR creado: {pr['url']}")
-        elif pr and "error" in pr:
-            if "GITHUB_TOKEN no configurado" in pr["error"]:
-                from src.intent_handler import request_github_token
-                pr_data = {
-                    "title": f"[{task.id}] {task.title}",
-                    "body": f"## Resumen\n\n{result[:2000] if result else 'Tarea completada.'}\n\n---\n_PR generado automáticamente por agent-serve_",
-                    "head": pr.get("head", ""),
-                    "base": "main",
-                }
-                request_github_token(chat_id, pr_data)
-                await notify("🔑 Para crear el PR necesito tu GitHub token.\nEnvíalo ahora (Personal Access Token con permisos `repo`):")
-            else:
-                await notify(f"⚠️ Push OK pero PR falló: {pr['error']}")
+                # --- Push + PR al finalizar ---
+                def _push_and_pr():
+                    import git as _git
+                    repo = _git.Repo(str(ws_now["repo_path"]))
+                    branch = repo.active_branch.name
+                    repo.git.add(A=True)
+                    if repo.is_dirty(untracked_files=False) or repo.index.diff("HEAD"):
+                        repo.index.commit(f"feat({task.id}): {task.title}")
+                    approve_push(branch)
+                    push_result = git_push_branch(branch)
+                    if "error" in push_result.lower():
+                        return push_result, {"error": push_result, "head": branch}
+                    pr = create_github_pr(
+                        title=f"[{task.id}] {task.title}",
+                        body=f"## Resumen\n\n{result[:2000] if result else 'Tarea completada por el agente.'}\n\n---\n_PR generado automáticamente por agent-serve_",
+                        head=branch,
+                        base="main",
+                    )
+                    pr["head"] = branch
+                    return push_result, pr
+
+                push_res, pr = await loop.run_in_executor(None, _push_and_pr)
+                if pr and "url" in pr:
+                    await notify(f"🔀 PR creado: {pr['url']}")
+                elif pr and "error" in pr:
+                    if "GITHUB_TOKEN no configurado" in pr["error"]:
+                        from src.intent_handler import request_github_token
+                        request_github_token(chat_id, {
+                            "title": f"[{task.id}] {task.title}",
+                            "body": f"## Resumen\n\n{result[:2000] if result else 'Tarea completada.'}\n\n---\n_PR generado automáticamente por agent-serve_",
+                            "head": pr.get("head", ""), "base": "main",
+                        })
+                        await notify("🔑 Para crear el PR necesito tu GitHub token.\nEnvíalo ahora (Personal Access Token con permisos `repo`):")
+                    else:
+                        await notify(f"⚠️ Push OK pero PR falló: {pr['error']}")
+            except asyncio.CancelledError:
+                await notify("⛔ Tarea cancelada.")
+            finally:
+                _current_task = None
+
+        context.application.create_task(_finish_task(_current_task))
 
     # --- Intentar flujo de lenguaje natural ---
     from src.intent_handler import handle_natural_message
