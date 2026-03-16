@@ -1,7 +1,6 @@
 import os
 import json
 import logging
-from pathlib import Path
 from src.llm_runner import run_llm
 from src.workspace_context import get_active_repo_path
 
@@ -43,6 +42,36 @@ Responde SOLO con un JSON con esta estructura:
 Tarea: {message}"""
 
 
+
+
+def normalize_spec(spec: dict) -> dict:
+    """Normaliza spec para soportar subtareas jerárquicas y mantener compatibilidad."""
+    if not isinstance(spec, dict):
+        return {"title": "spec", "objective": "", "subtasks": []}
+
+    subtasks = spec.get("subtasks", [])
+    flat: list[str] = []
+    hierarchical: list[dict] = []
+
+    if isinstance(subtasks, list):
+        for item in subtasks:
+            if isinstance(item, str):
+                flat.append(item)
+            elif isinstance(item, dict):
+                phase = str(item.get("phase") or item.get("name") or "phase").strip()
+                phase_tasks = item.get("tasks") or item.get("subtasks") or []
+                phase_flat = [str(t).strip() for t in phase_tasks if str(t).strip()]
+                if phase_flat:
+                    hierarchical.append({"phase": phase, "tasks": phase_flat})
+                    for t in phase_flat:
+                        flat.append(f"[{phase}] {t}")
+
+    if hierarchical:
+        spec["subtasks_hierarchical"] = hierarchical
+    spec["subtasks"] = flat
+    return spec
+
+
 def classify_task(message: str, mode: str = "auto", manual_model_key: str | None = None) -> tuple[dict, str]:
     """Retorna ({"complexity": "simple"|"complex", ...}, model_used)"""
     msg_lower = message.lower()
@@ -62,7 +91,7 @@ def classify_task(message: str, mode: str = "auto", manual_model_key: str | None
         content = content.replace("```json", "").replace("```", "").strip()
         start = content.find("{")
         end = content.rfind("}") + 1
-        return json.loads(content[start:end]), result.model_used
+        return normalize_spec(json.loads(content[start:end])), result.model_used
     except Exception as e:
         log.warning("Error clasificando tarea: %s — asumiendo simple", e)
         return {"complexity": "simple"}, "?"
@@ -82,10 +111,10 @@ def generate_spec(message: str, mode: str = "auto", manual_model_key: str | None
         content = content.replace("```json", "").replace("```", "").strip()
         start = content.find("{")
         end = content.rfind("}") + 1
-        return json.loads(content[start:end]), result.model_used
+        return normalize_spec(json.loads(content[start:end])), result.model_used
     except Exception as e:
         log.error("Error generando spec: %s", e)
-        return {"title": "spec", "objective": message, "subtasks": [], "error": str(e)}, "?"
+        return normalize_spec({"title": "spec", "objective": message, "subtasks": [], "error": str(e)}), "?"
 
 
 def save_spec(spec: dict) -> str:
@@ -139,3 +168,39 @@ def plan_task(message: str, mode: str = "auto", manual_model_key: str | None = N
         "\n".join(f"  - {s}" for s in spec.get("subtasks", []))
     )
     return True, summary, model_used
+
+
+def enrich_task_plan(spec: dict) -> dict:
+    subtasks = spec.get("subtasks", []) or []
+    grouped: dict[str, list[str]] = {}
+    dependencies: list[dict] = []
+    risk = "low"
+
+    high_risk_signals = ("migr", "auth", "security", "schema", "refactor", "payment", "prod")
+
+    for idx, st in enumerate(subtasks, 1):
+        text = str(st)
+        phase = "implementation"
+        if text.startswith("[") and "]" in text:
+            phase = text[1:text.index("]")].strip().lower() or "implementation"
+            text = text[text.index("]") + 1 :].strip()
+        grouped.setdefault(phase, []).append(text)
+
+        low = text.lower()
+        if any(sig in low for sig in high_risk_signals):
+            risk = "high"
+        elif risk != "high" and any(k in low for k in ("api", "db", "cache", "queue")):
+            risk = "medium"
+
+        if "depends on" in low or "dep:" in low:
+            dependencies.append({"subtask_index": idx, "raw": st})
+
+    ordered_phases = sorted(grouped.keys(), key=lambda x: ["analysis", "design", "implementation", "tests", "review"].index(x) if x in ["analysis", "design", "implementation", "tests", "review"] else 99)
+
+    return {
+        "grouped_subtasks": grouped,
+        "ordered_phases": ordered_phases,
+        "dependencies": dependencies,
+        "risk": risk,
+        "total_subtasks": len(subtasks),
+    }

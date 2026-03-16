@@ -7,6 +7,7 @@ from src.executor import execute_tool_call, _safe_parse_args, is_cancelled, MAX_
 from src.tools import TOOLS
 
 MODEL = os.getenv("LLM_MODEL", "deepseek/deepseek-chat")
+MAX_NO_CODE_CHANGE_RETRIES = int(os.getenv("CODER_MAX_NO_CODE_RETRIES", "2"))
 log = logging.getLogger("coder")
 
 # Tools permitidas para el coder — solo lectura/escritura de código y git
@@ -34,14 +35,35 @@ Subtarea a implementar:
 Reglas estrictas:
 - Implementa SOLO lo que dice la subtarea, nada más.
 - No refactorices código fuera del alcance.
+- NO entregues solo análisis o explicación: debes aplicar cambios reales en archivos cuando la subtarea sea de implementación.
+- Si la subtarea es solo "analizar", "investigar" o "documentar" sin pedir cambios de código, responde con "NECESITA_IMPLEMENTACION_EXPLICITA" y no finalices como completada.
+- Para cambiar código usa herramientas de edición (write_file/replace_content/replace_symbol_body/etc.).
 - Reporta cada archivo que modifiques.
 - Si algo es ambiguo, elige la opción más conservadora.
 - Responde en español."""
 
 
+def _has_code_changes(repo_path: str | None) -> bool:
+    if not repo_path:
+        return bool(False)
+    try:
+        import subprocess
+        changed_files = [
+            p.strip() for p in subprocess.check_output(["git", "diff", "--name-only", "HEAD"], cwd=repo_path, text=True).splitlines()
+            if p.strip()
+        ]
+    except Exception:
+        return False
+
+    code_exts = (".py", ".js", ".ts", ".tsx", ".jsx", ".html", ".css", ".scss", ".json", ".yml", ".yaml", ".toml", ".sh")
+    return any((f.startswith("src/") or f == "main.py" or f.endswith(code_exts)) and not f.endswith(".md") for f in changed_files)
+
+
 def run_coder(subtask: str, context: str = "", progress_callback=None,
               mode: str = "auto", manual_model_key: str | None = None,
-              repo_path: str | None = None) -> dict:
+              repo_path: str | None = None,
+              max_llm_calls: int | None = None,
+              max_tool_calls: int | None = None) -> dict:
     """
     Ejecuta una subtarea de codificación con scope acotado.
     Retorna {"result": str, "modified_files": list, "status": str}
@@ -49,6 +71,9 @@ def run_coder(subtask: str, context: str = "", progress_callback=None,
     log.info("Coder iniciando subtarea: %s", subtask[:80])
     ctx = TaskContext(message=subtask)
     guard = LoopGuard()
+    no_code_change_retries = 0
+    llm_calls = 0
+    tool_calls = 0
 
     system = _CODER_PROMPT.format(context=context or "Sin contexto adicional.", subtask=subtask)
     messages = [
@@ -61,7 +86,7 @@ def run_coder(subtask: str, context: str = "", progress_callback=None,
 
         if is_cancelled():
             ctx.finish("cancelled")
-            return {"result": "⛔ Cancelado.", "modified_files": ctx.modified_files, "status": "cancelled"}
+            return {"result": "⛔ Cancelado.", "modified_files": ctx.modified_files, "status": "cancelled", "llm_calls": llm_calls, "tool_calls": tool_calls}
 
         # Heartbeat: actualizar updated_at del run activo para que el watchdog sepa que sigue vivo
         try:
@@ -72,6 +97,10 @@ def run_coder(subtask: str, context: str = "", progress_callback=None,
         except Exception:
             pass
 
+        if max_llm_calls is not None and llm_calls >= max_llm_calls:
+            ctx.finish("error", f"Presupuesto LLM agotado ({llm_calls}/{max_llm_calls})")
+            return {"result": "Presupuesto LLM agotado para esta corrida.", "modified_files": ctx.modified_files, "status": "error", "llm_calls": llm_calls, "tool_calls": tool_calls}
+
         try:
             llm_result = run_llm(
                 messages=messages,
@@ -79,32 +108,65 @@ def run_coder(subtask: str, context: str = "", progress_callback=None,
                 tools=_CODER_TOOLS,
                 tool_choice="auto",
                 mode=mode,
-                manual_model_key=manual_model_key,
+                manual_model_key=None if manual_model_key == "codex_mini" else manual_model_key,
                 repo_path=repo_path,
             )
             msg = llm_result.message
+            llm_calls += 1
             if progress_callback and iteration == 0:
                 progress_callback(f"🤖 [coder/{llm_result.model_used}] ejecutando...")
         except Exception as e:
             log.error("Error LLM coder: %s", e)
             ctx.finish("error", str(e))
-            return {"result": f"Error: {e}", "modified_files": ctx.modified_files, "status": "error"}
+            return {"result": f"Error: {e}", "modified_files": ctx.modified_files, "status": "error", "llm_calls": llm_calls, "tool_calls": tool_calls}
 
         messages.append(msg.model_dump(exclude_none=True))
 
         if not msg.tool_calls:
+            content = (msg.content or "").strip()
+            if "NECESITA_IMPLEMENTACION_EXPLICITA" in content:
+                ctx.finish("error", "Subtarea sin instrucción de implementación")
+                return {
+                    "result": "Subtarea solo de análisis/documentación sin instrucción de implementar código.",
+                    "modified_files": ctx.modified_files,
+                    "status": "error",
+                    "llm_calls": llm_calls,
+                    "tool_calls": tool_calls,
+                }
+            if not _has_code_changes(repo_path):
+                no_code_change_retries += 1
+                retry_msg = "No detecté cambios de código en git diff --stat. Debes modificar archivos de código, no solo analizar."
+                messages.append({"role": "user", "content": retry_msg})
+                if progress_callback:
+                    progress_callback(f"⚠️ Coder sin cambios de código detectados (intento {no_code_change_retries}/{MAX_NO_CODE_CHANGE_RETRIES}); reintentando con instrucción explícita.")
+                if no_code_change_retries >= MAX_NO_CODE_CHANGE_RETRIES:
+                    ctx.finish("error", "Sin cambios de código tras reintentos controlados")
+                    return {
+                        "result": "No se detectaron cambios de código tras reintentos controlados. Se aborta para evitar loops/costo innecesario.",
+                        "modified_files": ctx.modified_files,
+                        "status": "error",
+                        "llm_calls": llm_calls,
+                        "tool_calls": tool_calls,
+                    }
+                continue
+
             ctx.finish("completed")
             log.info("Coder completó subtarea en %d iteraciones", iteration + 1)
             return {
                 "result": msg.content,
                 "modified_files": ctx.modified_files,
                 "status": "completed",
+                "llm_calls": llm_calls,
+                "tool_calls": tool_calls,
             }
 
         for tc in msg.tool_calls:
+            if max_tool_calls is not None and tool_calls >= max_tool_calls:
+                ctx.finish("error", f"Presupuesto tools agotado ({tool_calls}/{max_tool_calls})")
+                return {"result": "Presupuesto de tool-calls agotado para esta corrida.", "modified_files": ctx.modified_files, "status": "error", "llm_calls": llm_calls, "tool_calls": tool_calls}
             if is_cancelled():
                 ctx.finish("cancelled")
-                return {"result": "⛔ Cancelado.", "modified_files": ctx.modified_files, "status": "cancelled"}
+                return {"result": "⛔ Cancelado.", "modified_files": ctx.modified_files, "status": "cancelled", "llm_calls": llm_calls, "tool_calls": tool_calls}
 
             name = tc.function.name
 
@@ -121,18 +183,19 @@ def run_coder(subtask: str, context: str = "", progress_callback=None,
             loop_err = guard.record_call(name, _safe_parse_args(tc))
             if loop_err:
                 ctx.finish("loop_detected", loop_err)
-                return {"result": loop_err, "modified_files": ctx.modified_files, "status": "loop_detected"}
+                return {"result": loop_err, "modified_files": ctx.modified_files, "status": "loop_detected", "llm_calls": llm_calls, "tool_calls": tool_calls}
 
             if progress_callback:
                 progress_callback(f"🔧 Coder: `{name}`")
 
             name, args, result = execute_tool_call(tc)
+            tool_calls += 1
             ctx.record_tool(name, args, result, iteration + 1)
 
             loop_err = guard.record_result(name, result)
             if loop_err:
                 ctx.finish("loop_detected", loop_err)
-                return {"result": loop_err, "modified_files": ctx.modified_files, "status": "loop_detected"}
+                return {"result": loop_err, "modified_files": ctx.modified_files, "status": "loop_detected", "llm_calls": llm_calls, "tool_calls": tool_calls}
 
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
 
@@ -141,4 +204,6 @@ def run_coder(subtask: str, context: str = "", progress_callback=None,
         "result": "⚠️ Límite de iteraciones alcanzado.",
         "modified_files": ctx.modified_files,
         "status": "limit_reached",
+        "llm_calls": llm_calls,
+        "tool_calls": tool_calls,
     }

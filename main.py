@@ -1,6 +1,10 @@
 import asyncio
 import os
 import re
+from pathlib import Path
+import threading
+import time
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
@@ -18,11 +22,12 @@ from src.task_store import TaskStore
 from src.task_file_manager import TaskFileManager
 from src.tools import git_diff_summary
 from src.llm_registry import models_status_text, get_model, register_dynamic_model
-from src.chat_preferences import get_preference, set_auto, set_manual
+from src.chat_preferences import get_preference, set_auto, set_manual, set_budget
 from src.llm_runner import stats_text
 from src.work_item import WorkItem
 from src.workspace_context import set_active_repo_path
 from src.workspace_manager import WorkspaceError, WorkspaceManager
+from src.runtime_state import set_session, set_pending_pr, get_pending_pr, clear_pending_pr
 
 load_dotenv()
 
@@ -32,6 +37,7 @@ ALLOWED_USER = int(os.getenv("TELEGRAM_ALLOWED_USER", "0"))
 _bot_app = None
 _current_task = None
 _current_run_id = None
+_pending_pr_confirmations: dict[int, dict] = {}
 
 
 def _no_preview_kwargs() -> dict:
@@ -70,6 +76,12 @@ def _resolve_target_run_id(explicit: str | None = None) -> str | None:
     return latest.get("run_id") if latest else None
 
 
+
+
+def _extract_review_verdict(text: str) -> str:
+    m = re.search(r"•\s*Review:\s*([A-Z_]+)", text or "")
+    return (m.group(1).strip().upper() if m else "")
+
 def _parse_kv_args(args: list[str]) -> dict:
     parsed = {}
     for token in args:
@@ -78,6 +90,22 @@ def _parse_kv_args(args: list[str]) -> dict:
             parsed[k.strip()] = v.strip()
     return parsed
 
+
+
+
+def _has_repeated_failure_pattern(run_data: dict, threshold: int = 3) -> tuple[bool, str]:
+    checkpoints = run_data.get("checkpoints", []) or []
+    failed = [c for c in checkpoints if isinstance(c, dict) and c.get("label") in ("subtask_failed", "paused_by_circuit_breaker")]
+    if len(failed) < threshold:
+        return False, ""
+    tail = failed[-threshold:]
+    reasons = []
+    for c in tail:
+        data = c.get("data", {}) if isinstance(c.get("data", {}), dict) else {}
+        reasons.append(f"{data.get('subtask','?')}|{data.get('status', data.get('reason','?'))}")
+    if len(set(reasons)) == 1:
+        return True, reasons[0]
+    return False, ""
 
 def _set_workspace_context(chat_id: int):
     ws = WorkspaceManager().get_active_workspace(chat_id)
@@ -92,6 +120,7 @@ async def _watch_current_task(update: Update, task: asyncio.Future):
         maybe_run = _extract_run_id(result)
         if maybe_run:
             _current_run_id = maybe_run
+            set_session(update.effective_chat.id, current_run_id=maybe_run)
         await update.message.reply_text(result, **_no_preview_kwargs())
         await update.message.reply_text("Esta tarea quedó finalizada. ¿Deseas que continúe con la siguiente?", **_no_preview_kwargs())
     except asyncio.CancelledError:
@@ -148,10 +177,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     async def run_task_by_id(task_id: str):
-        from src.task_store import TaskStore
         from src.task_source_router import TaskSourceRouter
-        from src.tools import git_commit, git_push_branch, create_github_pr
-        from src.git_gate import approve_push
         ws_now = _set_workspace_context(chat_id)
         router = TaskSourceRouter(ws_now)
         tasks = router.list_tasks()
@@ -160,22 +186,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await notify(f"⚠️ Tarea {task_id} no encontrada.")
             return
         await notify(f"🚀 Ejecutando `{task.id[:8]}`: {task.title}")
+        set_session(chat_id, current_task_id=task.id)
         def run_sync():
             cb = _make_progress_callback(chat_id)
             # Verificar si hay un run activo para esta tarea → reanudar
-            from src.run_state import list_recent_runs
-            existing = next(
-                (r for r in list_recent_runs(limit=20)
-                 if r.get("phase") not in ("done", "failed")
-                 and task.title[:30] in r.get("source_message", "")),
-                None
-            )
+            from src.run_state import list_recent_runs, get_run_state
+            def _matches_task(r: dict) -> bool:
+                return ((r.get("task_id") and r.get("task_id") == task.id) or task.title[:30] in r.get("source_message", ""))
+
+            recent = [r for r in list_recent_runs(limit=100) if _matches_task(r)]
+            active = next((r for r in recent if r.get("phase") not in ("done", "failed")), None)
+            resumable_failed = next((r for r in recent if r.get("phase") == "failed"), None)
+            existing = active or resumable_failed
             if existing:
-                from src.supervisor import resume_run
-                return resume_run(existing["run_id"], progress_callback=cb)
+                run_data = get_run_state(existing["run_id"]) or {}
+                if run_data.get("next_action") not in ("done", "", None):
+                    from src.supervisor import resume_run
+                    return resume_run(existing["run_id"], progress_callback=cb)
             return run_supervisor(f"{task.title}\n\n{task.description or ''}",
                                   progress_callback=cb,
-                                  mode=pref["mode"], manual_model_key=pref["model_key"])
+                                  mode=pref["mode"], manual_model_key=pref["model_key"],
+                                  task_id=task.id,
+                                  max_llm_calls=pref.get("max_llm_calls"),
+                                  max_tool_calls=pref.get("max_tool_calls"))
         global _current_task, _current_run_id
         _current_task = loop.run_in_executor(None, run_sync)
 
@@ -186,64 +219,59 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 maybe_run = _extract_run_id(result)
                 if maybe_run:
                     _current_run_id = maybe_run
+                    set_session(chat_id, current_run_id=maybe_run, current_task_id=task.id)
                 await notify(result[:1000] if result else "✅ Tarea completada.")
 
                 # No hacer push/PR si la tarea fue pausada o cancelada
                 if result and any(x in result for x in ("⏸️", "⛔", "Cancelado", "pausada", "pausado")):
                     return
 
-                # --- Push + PR al finalizar ---
-                def _get_default_branch(repo) -> str:
-                    try:
-                        return repo.git.symbolic_ref("refs/remotes/origin/HEAD").split("/")[-1]
-                    except Exception:
-                        return "main"
+                verdict = _extract_review_verdict(result or "")
+                if verdict in ("RECHAZADO", "PARCIAL", "ERROR"):
+                    await notify(f"🛑 Reviewer gate bloqueó PR (verdict={verdict}). Corrige y reintenta.")
+                    return
 
-                def _push_and_pr():
+                # --- Confirmación antes de push + PR ---
+                def _build_pr_preview():
                     import git as _git
                     repo = _git.Repo(str(ws_now["repo_path"]))
                     branch = repo.active_branch.name
-                    base = _get_default_branch(repo)
+                    try:
+                        base = repo.git.symbolic_ref("refs/remotes/origin/HEAD").split("/")[-1]
+                    except Exception:
+                        base = "main"
                     repo.git.add(A=True)
-                    has_changes = repo.is_dirty(untracked_files=False) or bool(repo.index.diff("HEAD"))
+                    changed_files = [p for p in repo.git.diff("--name-only", "HEAD").splitlines() if p.strip()]
+                    diff_stat = repo.git.diff("--stat", "HEAD")[:1200]
+                    code_exts = {".py", ".js", ".ts", ".tsx", ".jsx", ".html", ".css", ".scss", ".json", ".yml", ".yaml", ".toml", ".sh"}
+                    has_source_changes = any((f.startswith("src/") or f == "main.py" or f.endswith(tuple(code_exts))) and not f.endswith(".md") for f in changed_files)
+                    has_changes = bool(changed_files)
                     if not has_changes:
                         try:
                             ahead = int(repo.git.rev_list("--count", f"{base}..HEAD").strip())
                         except Exception:
                             ahead = 0
                         if not ahead:
-                            return "sin_cambios", {}
-                    if has_changes:
-                        repo.index.commit(f"feat({task.id}): {task.title}")
-                    approve_push(branch)
-                    push_result = git_push_branch(branch)
-                    if "error" in push_result.lower():
-                        return push_result, {"error": push_result, "head": branch}
-                    pr = create_github_pr(
-                        title=f"[{task.id}] {task.title}",
-                        body=f"## Resumen\n\n{result[:2000] if result else 'Tarea completada por el agente.'}\n\n---\n_PR generado automáticamente por agent-serve_",
-                        head=branch,
-                        base=base,
-                    )
-                    pr["head"] = branch
-                    return push_result, pr
+                            return {"status": "sin_cambios", "branch": branch, "base": base, "diff_stat": diff_stat}
+                    if not has_source_changes:
+                        return {"status": "sin_cambios_codigo", "branch": branch, "base": base, "diff_stat": diff_stat}
+                    return {"status": "ok", "branch": branch, "base": base, "diff_stat": diff_stat}
 
-                push_res, pr = await loop.run_in_executor(None, _push_and_pr)
-                if push_res == "sin_cambios":
+                preview = await loop.run_in_executor(None, _build_pr_preview)
+                if preview["status"] in ("sin_cambios", "sin_cambios_codigo"):
                     await notify("⚠️ La tarea no produjo cambios de código. No se creó PR.")
-                elif pr and "url" in pr:
-                    await notify(f"🔀 PR creado: {pr['url']}")
-                elif pr and "error" in pr:
-                    if "GITHUB_TOKEN no configurado" in pr["error"]:
-                        from src.intent_handler import request_github_token
-                        request_github_token(chat_id, {
-                            "title": f"[{task.id}] {task.title}",
-                            "body": f"## Resumen\n\n{result[:2000] if result else 'Tarea completada.'}\n\n---\n_PR generado automáticamente por agent-serve_",
-                            "head": pr.get("head", ""), "base": "main",
-                        })
-                        await notify("🔑 Para crear el PR necesito tu GitHub token.\nEnvíalo ahora (Personal Access Token con permisos `repo`):")
-                    else:
-                        await notify(f"⚠️ Push OK pero PR falló: {pr['error']}")
+                    return
+
+                _pending_pr_confirmations[chat_id] = {
+                    "repo_path": ws_now["repo_path"],
+                    "task_id": task.id,
+                    "task_title": task.title,
+                    "result": result,
+                    "branch": preview["branch"],
+                    "base": preview["base"],
+                }
+                set_pending_pr(chat_id, _pending_pr_confirmations[chat_id])
+                await notify("🧾 Resumen diff antes de PR:\n```\n" + (preview.get("diff_stat") or "(sin diff stat)") + "\n```\nResponde con `/confirm_pr yes` para push+PR o `/confirm_pr no` para cancelar.")
             except asyncio.CancelledError:
                 await notify("⛔ Tarea cancelada.")
             finally:
@@ -353,7 +381,10 @@ async def handle_do_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             return run_supervisor(f"{task.title}\n\n{task.description}",
                                   progress_callback=_cb,
-                                  mode=pref["mode"], manual_model_key=pref["model_key"])
+                                  mode=pref["mode"], manual_model_key=pref["model_key"],
+                                  task_id=task.id,
+                                  max_llm_calls=pref.get("max_llm_calls"),
+                                  max_tool_calls=pref.get("max_tool_calls"))
         finally:
             pass
 
@@ -590,6 +621,175 @@ async def handle_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loop = asyncio.get_event_loop()
     _current_task = loop.run_in_executor(None, lambda: resume_run(run_id))
     context.application.create_task(_watch_current_task(update, _current_task))
+
+
+
+
+async def handle_resume_safe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global _current_task
+    if update.effective_user.id != ALLOWED_USER:
+        return
+    if _current_task and not _current_task.done():
+        await update.message.reply_text("⏳ Ya hay una tarea en ejecución. Usa /stop para cancelarla.", **_no_preview_kwargs())
+        return
+
+    from src.run_state import get_run_state
+    run_id = context.args[0] if context.args else _resolve_target_run_id(None)
+    if not run_id:
+        await update.message.reply_text("Uso: /resume_safe <run_id>", **_no_preview_kwargs())
+        return
+
+    run_data = get_run_state(run_id)
+    if not run_data:
+        await update.message.reply_text(f"❌ Run `{run_id}` no encontrado.", **_no_preview_kwargs())
+        return
+
+    blocked, pattern = _has_repeated_failure_pattern(run_data, threshold=3)
+    if blocked:
+        await update.message.reply_text(
+            f"🛑 /resume_safe rechazado: patrón de fallo repetido detectado (`{pattern}`).\n"
+            "Corrige la causa o fuerza con /resume si quieres continuar manualmente.",
+            **_no_preview_kwargs(),
+        )
+        return
+
+    await update.message.reply_text(f"🔄 Reanudando seguro run `{run_id}`...", **_no_preview_kwargs())
+    loop = asyncio.get_event_loop()
+    _current_task = loop.run_in_executor(None, lambda: resume_run(run_id))
+    context.application.create_task(_watch_current_task(update, _current_task))
+
+
+async def handle_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ALLOWED_USER:
+        return
+    chat_id = update.effective_chat.id
+    pref = get_preference(chat_id)
+    if not context.args:
+        await update.message.reply_text(
+            f"💸 Budget actual: max_llm_calls={pref.get('max_llm_calls')} | max_tool_calls={pref.get('max_tool_calls')}\n"
+            "Uso: /budget llm=<n|none> tools=<n|none>",
+            **_no_preview_kwargs(),
+        )
+        return
+
+    kv = _parse_kv_args(context.args)
+    def _parse(v):
+        if v is None:
+            return pref.get("max_llm_calls")
+        if str(v).lower() in ("none", "null", "off"):
+            return None
+        return max(1, int(v))
+
+    try:
+        llm_val = _parse(kv.get("llm"))
+        tools_in = kv.get("tools")
+        if tools_in is None:
+            tools_val = pref.get("max_tool_calls")
+        elif str(tools_in).lower() in ("none", "null", "off"):
+            tools_val = None
+        else:
+            tools_val = max(1, int(tools_in))
+    except Exception:
+        await update.message.reply_text("⚠️ Parámetros inválidos. Ej: /budget llm=40 tools=120", **_no_preview_kwargs())
+        return
+
+    set_budget(chat_id, llm_val, tools_val)
+    await update.message.reply_text(f"✅ Budget actualizado: max_llm_calls={llm_val} | max_tool_calls={tools_val}", **_no_preview_kwargs())
+
+
+async def handle_confirm_pr(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ALLOWED_USER:
+        return
+    chat_id = update.effective_chat.id
+    pending = _pending_pr_confirmations.get(chat_id) or get_pending_pr(chat_id)
+    if not pending:
+        await update.message.reply_text("ℹ️ No hay PR pendiente de confirmación.", **_no_preview_kwargs())
+        return
+
+    answer = (context.args[0].lower() if context.args else "").strip()
+    if answer in ("no", "cancel", "cancelar"):
+        _pending_pr_confirmations.pop(chat_id, None)
+        clear_pending_pr(chat_id)
+        await update.message.reply_text("❌ Push/PR cancelado por usuario.", **_no_preview_kwargs())
+        return
+    if answer not in ("yes", "si", "sí"):
+        await update.message.reply_text("Uso: /confirm_pr yes | /confirm_pr no", **_no_preview_kwargs())
+        return
+
+    from src.tools import git_push_branch, create_github_pr
+    from src.git_gate import approve_push
+    def _push_and_pr_sync():
+        import git as _git
+        import time as _time
+        repo = _git.Repo(str(pending["repo_path"]))
+        branch = pending["branch"]
+        base = pending["base"]
+        repo.git.add(A=True)
+        if repo.is_dirty(untracked_files=False) or bool(repo.git.diff("--name-only", "HEAD").strip()):
+            repo.index.commit(f"feat({pending['task_id']}): {pending['task_title']}")
+        approve_push(branch)
+
+        last_push = ""
+        for i in range(2):
+            last_push = git_push_branch(branch)
+            if "error" not in last_push.lower():
+                break
+            _time.sleep(1.5 * (i + 1))
+        if "error" in last_push.lower():
+            return last_push, {"error": last_push, "head": branch}
+
+        pr = {}
+        last_err = ""
+        for i in range(2):
+            pr = create_github_pr(
+                title=f"[{pending['task_id']}] {pending['task_title']}",
+                body=f"## Resumen\n\n{pending['result'][:2000] if pending['result'] else 'Tarea completada por el agente.'}\n\n---\n_PR generado automáticamente por agent-serve_",
+                head=branch,
+                base=base,
+            )
+            if "error" not in pr:
+                break
+            last_err = pr.get("error", "")
+            _time.sleep(1.5 * (i + 1))
+        if "error" in pr:
+            return last_push, {"error": last_err or pr.get("error", "unknown"), "head": branch}
+        pr["head"] = branch
+        return last_push, pr
+
+    loop = asyncio.get_event_loop()
+    push_res, pr = await loop.run_in_executor(None, _push_and_pr_sync)
+    _pending_pr_confirmations.pop(chat_id, None)
+    clear_pending_pr(chat_id)
+    if pr and "url" in pr:
+        await update.message.reply_text(f"🔀 PR creado: {pr['url']}", **_no_preview_kwargs())
+    elif pr and "error" in pr:
+        await update.message.reply_text(f"⚠️ Push/PR falló: {pr['error']}", **_no_preview_kwargs())
+    else:
+        await update.message.reply_text(f"⚠️ Resultado push: {push_res}", **_no_preview_kwargs())
+
+
+
+
+async def handle_bootstrap(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ALLOWED_USER:
+        return
+    ws = _set_workspace_context(update.effective_chat.id)
+    await update.message.reply_text("🧰 Ejecutando project bootstrap...", **_no_preview_kwargs())
+
+    from src.project_bootstrap import bootstrap_project
+    loop = asyncio.get_event_loop()
+    report = await loop.run_in_executor(None, lambda: bootstrap_project(ws["repo_path"]))
+
+    text = (
+        "📦 Bootstrap inicial completado\n"
+        f"• Lenguaje: {report.get('language')}\n"
+        f"• Package manager: {report.get('package_manager')}\n"
+        f"• Instalar deps: {'✅' if report.get('install_ok') else '⚠️'}\n"
+        f"• Tests iniciales: {'✅' if report.get('tests_ok') else '⚠️'}\n"
+        f"• Módulos detectados: {report.get('modules', 0)}\n"
+        f"• Dependencias detectadas: {report.get('dependencies', 0)}"
+    )
+    await update.message.reply_text(text, **_no_preview_kwargs())
 
 
 async def handle_modelstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -872,6 +1072,10 @@ _HELP_TEXT = """🤖 *Comandos disponibles*
 /do\_next — ejecuta la siguiente tarea elegible
 /stop — cancela la tarea en curso
 /resume [run\_id] — reanuda una corrida pausada
+/resume\_safe [run\_id] — reanuda solo si no detecta patrón repetido de fallo
+/budget llm=<n|none> tools=<n|none> — configura presupuesto por chat
+/confirm\_pr yes|no — confirma push+PR tras ver diff stat
+/bootstrap — bootstrap de repo (deps, tests iniciales, mapa)
 
 *Observabilidad*
 /status [run\_id] — dashboard del run activo/último
@@ -1045,6 +1249,10 @@ def main():
     _bot_app.add_handler(CommandHandler("status", handle_status))
     _bot_app.add_handler(CommandHandler("plan", handle_plan))
     _bot_app.add_handler(CommandHandler("resume", handle_resume))
+    _bot_app.add_handler(CommandHandler("resume_safe", handle_resume_safe))
+    _bot_app.add_handler(CommandHandler("budget", handle_budget))
+    _bot_app.add_handler(CommandHandler("confirm_pr", handle_confirm_pr))
+    _bot_app.add_handler(CommandHandler("bootstrap", handle_bootstrap))
     _bot_app.add_handler(CommandHandler("logs", handle_logs))
     _bot_app.add_handler(CommandHandler("diff", handle_diff))
     _bot_app.add_handler(CommandHandler("models", handle_models))
@@ -1083,6 +1291,50 @@ def main():
             sync_send(f"⚡ Bot reiniciado. Hay una tarea interrumpida: `{task_msg}`\nUsa /resume para reanudar o /stop para cancelar.")
     except Exception as e:
         print(f"[startup] auto-resume check error: {e}")
+
+    # Watchdog de runs activos: cada 5 minutos marca runs sin eventos nuevos por >10 minutos
+    def _start_run_watchdog():
+        from src.run_state import get_latest_active_run, get_run_state, append_event, update_run_state
+        last_event_ts: dict[str, str] = {}
+        notified: set[str] = set()
+
+        def _watch_loop():
+            while True:
+                try:
+                    run = get_latest_active_run()
+                    if run:
+                        data = get_run_state(run["run_id"]) or run
+                        if data.get("phase") not in ("done", "failed"):
+                            rid = data["run_id"]
+                            events = data.get("events", [])
+                            latest_ev = events[-1].get("timestamp", "") if events else ""
+                            if rid not in last_event_ts:
+                                last_event_ts[rid] = latest_ev
+
+                            updated = data.get("updated_at", "")
+                            age_min = 0
+                            try:
+                                last = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+                                if last.tzinfo is None:
+                                    last = last.replace(tzinfo=timezone.utc)
+                                age_min = (datetime.now(timezone.utc) - last).total_seconds() / 60
+                            except Exception:
+                                pass
+
+                            if latest_ev == last_event_ts.get(rid, "") and age_min > 10 and rid not in notified:
+                                sync_send(f"⚠️ Run `{rid[:8]}` sin eventos nuevos por {int(age_min)} min. Marcado como stale.")
+                                append_event(rid, "run_failed", "failed", {"reason": f"watchdog stale >10m ({int(age_min)}m)"})
+                                update_run_state(rid, phase="failed")
+                                notified.add(rid)
+                            else:
+                                last_event_ts[rid] = latest_ev
+                except Exception as e:
+                    print(f"[watchdog] error: {e}")
+                time.sleep(300)
+
+        threading.Thread(target=_watch_loop, daemon=True, name="run-watchdog").start()
+
+    _start_run_watchdog()
 
     print("🚀 Agent server corriendo... (/workon /plan_tasks /addtask /addtasks /do_task /do_next /tasks /task /taskmode /sync_notion_to_tasks /export_tasks /stop /status /plan /resume /logs /diff /models /model /runwith /modelstats)")
     _bot_app.run_polling(drop_pending_updates=True, allowed_updates=["message"])

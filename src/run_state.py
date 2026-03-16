@@ -30,6 +30,7 @@ def _conn() -> sqlite3.Connection:
         """
         CREATE TABLE IF NOT EXISTS run_states (
             run_id TEXT PRIMARY KEY,
+            task_id TEXT,
             source_message TEXT NOT NULL DEFAULT '',
             phase TEXT NOT NULL,
             next_action TEXT NOT NULL DEFAULT 'planning',
@@ -48,12 +49,28 @@ def _conn() -> sqlite3.Connection:
         """
     )
     _ensure_column(conn, "run_states", "source_message", "source_message TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "run_states", "task_id", "task_id TEXT")
     _ensure_column(conn, "run_states", "next_action", "next_action TEXT NOT NULL DEFAULT 'planning'")
     _ensure_column(conn, "run_states", "checkpoints", "checkpoints TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(conn, "run_states", "attempts", "attempts TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(conn, "run_states", "current_subtask_index", "current_subtask_index INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "run_states", "spec", "spec TEXT NOT NULL DEFAULT '{}'")
     _ensure_column(conn, "run_states", "completed_subtasks", "completed_subtasks TEXT NOT NULL DEFAULT '[]'")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS run_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            decision_type TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            details TEXT NOT NULL DEFAULT '{}',
+            cost_estimate REAL NOT NULL DEFAULT 0,
+            risk_level TEXT NOT NULL DEFAULT 'low'
+        )
+        """
+    )
     conn.commit()
     return conn
 
@@ -134,19 +151,19 @@ def _build_checkpoint(label: str, phase: str, data: dict[str, Any] | None = None
     }
 
 
-def create_run_state(initial_phase: str = "planning", source_message: str = "") -> str:
+def create_run_state(initial_phase: str = "planning", source_message: str = "", task_id: str | None = None) -> str:
     run_id = str(uuid.uuid4())
     ts = _now()
     with _conn() as conn:
         conn.execute(
             """
             INSERT INTO run_states (
-                run_id, source_message, phase, next_action, current_subtask, current_subtask_index,
+                run_id, task_id, source_message, phase, next_action, current_subtask, current_subtask_index,
                 spec, completed_subtasks, modified_files, validations, events, checkpoints, attempts,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (run_id, source_message, initial_phase, initial_phase, "", 0, "{}", "[]", "[]", "[]", "[]", "[]", "[]", ts, ts),
+            (run_id, task_id, source_message, initial_phase, initial_phase, "", 0, "{}", "[]", "[]", "[]", "[]", "[]", "[]", ts, ts),
         )
         conn.commit()
     return run_id
@@ -159,6 +176,7 @@ def get_run_state(run_id: str) -> dict | None:
             SELECT run_id, phase, current_subtask, modified_files,
                    validations, events, checkpoints, attempts, source_message, created_at, updated_at,
                    next_action, current_subtask_index, spec, completed_subtasks
+                   , task_id
             FROM run_states
             WHERE run_id=?
             """,
@@ -184,6 +202,7 @@ def get_run_state(run_id: str) -> dict | None:
         "current_subtask_index": int(row[12] or 0),
         "spec": _loads(row[13], {}),
         "completed_subtasks": _loads(row[14], []),
+        "task_id": row[15] or "",
     }
 
 
@@ -192,6 +211,7 @@ def update_run_state(
     *,
     phase: str | None = None,
     source_message: str | None = None,
+    task_id: str | None = None,
     next_action: str | None = None,
     current_subtask: str | None = None,
     current_subtask_index: int | None = None,
@@ -209,6 +229,7 @@ def update_run_state(
 
     next_phase = phase if phase is not None else current["phase"]
     next_source_message = source_message if source_message is not None else current["source_message"]
+    next_task_id = task_id if task_id is not None else current.get("task_id", "")
     next_action_value = next_action if next_action is not None else current.get("next_action", "planning")
     next_subtask = current_subtask if current_subtask is not None else current["current_subtask"]
     next_subtask_index = current_subtask_index if current_subtask_index is not None else current.get("current_subtask_index", 0)
@@ -224,12 +245,13 @@ def update_run_state(
         conn.execute(
             """
             UPDATE run_states
-            SET phase=?, source_message=?, next_action=?, current_subtask=?, current_subtask_index=?, spec=?,
+            SET phase=?, task_id=?, source_message=?, next_action=?, current_subtask=?, current_subtask_index=?, spec=?,
                 completed_subtasks=?, modified_files=?, validations=?, events=?, checkpoints=?, attempts=?, updated_at=?
             WHERE run_id=?
             """,
             (
                 next_phase,
+                next_task_id,
                 next_source_message,
                 next_action_value,
                 next_subtask,
@@ -307,6 +329,7 @@ def list_recent_runs(limit: int = 10) -> list[dict]:
         rows = conn.execute(
             """
             SELECT run_id, phase, current_subtask, updated_at, source_message
+                   , task_id
             FROM run_states
             ORDER BY datetime(updated_at) DESC
             LIMIT ?
@@ -321,6 +344,7 @@ def list_recent_runs(limit: int = 10) -> list[dict]:
             "current_subtask": r[2] or "",
             "updated_at": r[3],
             "source_message": r[4] or "",
+            "task_id": r[5] or "",
         }
         for r in rows
     ]
@@ -337,3 +361,56 @@ def get_latest_active_run() -> dict | None:
         if r.get("phase") not in ("done", "failed"):
             return r
     return None
+
+
+def append_decision(run_id: str, phase: str, decision_type: str, actor: str,
+                    details: dict[str, Any] | None = None,
+                    cost_estimate: float = 0,
+                    risk_level: str = "low") -> bool:
+    if not get_run_state(run_id):
+        return False
+    with _conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO run_decisions(run_id, timestamp, phase, decision_type, actor, details, cost_estimate, risk_level)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                _now(),
+                phase,
+                decision_type,
+                actor,
+                json.dumps(details or {}, ensure_ascii=False),
+                float(cost_estimate or 0),
+                risk_level or "low",
+            ),
+        )
+        conn.commit()
+    return True
+
+
+def list_run_decisions(run_id: str, limit: int = 200) -> list[dict]:
+    with _conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT timestamp, phase, decision_type, actor, details, cost_estimate, risk_level
+            FROM run_decisions
+            WHERE run_id=?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (run_id, limit),
+        ).fetchall()
+    out = []
+    for r in rows:
+        out.append({
+            "timestamp": r[0],
+            "phase": r[1],
+            "decision_type": r[2],
+            "actor": r[3],
+            "details": _loads(r[4], {}),
+            "cost_estimate": float(r[5] or 0),
+            "risk_level": r[6] or "low",
+        })
+    return out
