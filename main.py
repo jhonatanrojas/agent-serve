@@ -697,10 +697,12 @@ async def handle_codexlogin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("🔐 Iniciando device flow de Codex CLI...", **_no_preview_kwargs())
 
-    import subprocess, threading, re
+    import subprocess, threading, re, time, os as _os
 
     def strip_ansi(text):
         return re.sub(r'\x1B\[[0-9;]*[mK]', '', text)
+
+    loop = asyncio.get_event_loop()
 
     proc = subprocess.Popen(
         ["codex", "login", "--device-auth"],
@@ -722,14 +724,27 @@ async def handle_codexlogin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(msg, **_no_preview_kwargs())
 
+    auth_path = _os.path.expanduser("~/.codex/auth.json")
+
     def wait_and_notify():
-        proc.wait()
+        # Esperar hasta 10 min a que aparezca auth.json (señal de login exitoso)
+        for _ in range(600):
+            if _os.path.exists(auth_path):
+                break
+            time.sleep(1)
+
         status = strip_ansi(
             subprocess.run(["codex", "login", "status"], capture_output=True, text=True).stdout
         ).strip()
+
+        if "logged in" in status.lower() or _os.path.exists(auth_path):
+            msg_done = f"✅ Codex autenticado exitosamente!\n{status}"
+        else:
+            msg_done = f"⚠️ Codex login no completado o expiró.\n{status}"
+
         asyncio.run_coroutine_threadsafe(
-            update.message.reply_text(f"✅ Codex login: {status}", **_no_preview_kwargs()),
-            asyncio.get_event_loop(),
+            update.message.reply_text(msg_done, **_no_preview_kwargs()),
+            loop,
         )
 
     threading.Thread(target=wait_and_notify, daemon=True).start()
