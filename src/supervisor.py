@@ -105,6 +105,20 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
         model_label = candidates[0].key if candidates else "?"
         notify(f"🤖 [{agent}/{model_label}] {msg}")
 
+    _coder_tool_counts: dict = {"n": 0}
+
+    def coder_progress(msg: str):
+        """Filtra mensajes del coder: suprime tool calls individuales, resume en contador."""
+        if msg.startswith("🔧 Coder:"):
+            _coder_tool_counts["n"] += 1
+            return
+        if msg.startswith("🔧 ") and ":" in msg:
+            # output de tool — suprimir
+            return
+        if msg.startswith("🤖 [coder/"):
+            _coder_tool_counts["n"] = 0
+        notify(msg)
+
     run_id = existing_run_id or create_run_state(initial_phase="planning", source_message=user_message, task_id=task_id)
 
     try:
@@ -264,11 +278,16 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
                 effective_context = context + f"\n\nRecovery strategy: {strategy_used}"
                 remaining_llm = None if max_llm_calls is None else max(max_llm_calls - run_llm_calls, 0)
                 remaining_tools = None if max_tool_calls is None else max(max_tool_calls - run_tool_calls, 0)
-                result = run_coder(subtask, context=effective_context, progress_callback=progress_callback,
+                _coder_tool_counts["n"] = 0
+                result = run_coder(subtask, context=effective_context, progress_callback=coder_progress,
                                    mode=mode, manual_model_key=manual_model_key,
                                    repo_path=workspace.get("repo_path"),
                                    max_llm_calls=remaining_llm,
                                    max_tool_calls=remaining_tools)
+                if _coder_tool_counts["n"]:
+                    modified = result.get("modified_files", [])
+                    files_str = ", ".join(f"`{f}`" for f in modified[:5]) if modified else "sin archivos modificados"
+                    notify(f"🔧 {_coder_tool_counts['n']} tool calls — {files_str}")
                 run_llm_calls += int(result.get("llm_calls", 0) or 0)
                 run_tool_calls += int(result.get("tool_calls", 0) or 0)
                 changed_now = result.get("modified_files", [])
