@@ -63,6 +63,18 @@ async def _watch_current_task(update: Update, task: asyncio.Future):
         _current_task = None
 
 
+async def _watch_current_task(update: Update, task: asyncio.Future):
+    """Espera una tarea en background y reporta resultado sin bloquear updates."""
+    global _current_task
+    try:
+        result = await task
+        await update.message.reply_text(result)
+    except asyncio.CancelledError:
+        await update.message.reply_text("⛔ Tarea cancelada.")
+    finally:
+        _current_task = None
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global _current_task
     if update.effective_user.id != ALLOWED_USER:
