@@ -61,6 +61,15 @@ def run_coder(subtask: str, context: str = "", progress_callback=None,
             ctx.finish("cancelled")
             return {"result": "⛔ Cancelado.", "modified_files": ctx.modified_files, "status": "cancelled"}
 
+        # Heartbeat: actualizar updated_at del run activo para que el watchdog sepa que sigue vivo
+        try:
+            from src.run_state import _conn, _now
+            with _conn() as conn:
+                conn.execute("UPDATE run_states SET updated_at=? WHERE phase NOT IN ('done','failed') ORDER BY datetime(updated_at) DESC LIMIT 1", (_now(),))
+                conn.commit()
+        except Exception:
+            pass
+
         try:
             llm_result = run_llm(
                 messages=messages,

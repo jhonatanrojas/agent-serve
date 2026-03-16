@@ -156,14 +156,30 @@ async def handle_natural_message(
 
         # Estado de ejecución
         if active_run and active_run.get("phase") not in ("done", None):
-            lines.append("⚙️ **Tarea en ejecución**")
+            from datetime import datetime, timezone
+            updated_at = active_run.get("updated_at", "")
+            stale = False
+            stale_mins = 0
+            try:
+                last = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+                now = datetime.now(timezone.utc)
+                stale_mins = int((now - last).total_seconds() / 60)
+                stale = stale_mins > 3
+            except Exception:
+                pass
+
+            status_icon = "⚠️ INACTIVO" if stale else "⚙️ Activo"
+            lines.append(f"{status_icon} **Tarea en ejecución**")
             lines.append(f"• Fase: `{active_run.get('phase')}`")
             if active_run.get("current_subtask"):
-                lines.append(f"• Subtarea actual: `{active_run.get('current_subtask')}`")
+                lines.append(f"• Subtarea: `{active_run.get('current_subtask')}`")
             idx = active_run.get("current_subtask_index", 0)
             total = len(active_run.get("spec", {}).get("subtasks", []))
             if total:
                 lines.append(f"• Progreso: {idx}/{total} subtareas")
+            if stale:
+                lines.append(f"• ⏱️ Sin actividad hace {stale_mins} min — puede estar bloqueado")
+                lines.append(f"• Usa /resume para reanudar o /stop para cancelar")
 
         # Backlog de tareas
         if ws_data:
