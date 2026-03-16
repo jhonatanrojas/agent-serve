@@ -496,9 +496,53 @@ async def handle_runwith(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.application.create_task(_watch_current_task(update, _current_task))
 
 
-def main():
+_HELP_TEXT = """🤖 *Comandos disponibles*
+
+*Workspace*
+/workon repo=<url> branch=<b> [notion=<id>] — configura repo activo
+/taskmode [local|notion|hybrid] — consulta o cambia fuente de tareas
+
+*Backlog local*
+/addtask <titulo | descripcion | deps> — crea tarea local
+/addtasks <t1 ; t2 ; ...> — crea varias tareas en lote
+/tasks — lista backlog local
+/task <id> — detalle de una tarea local
+/export\_tasks — ruta del tasks.json local
+/sync\_notion\_to\_tasks — importa tareas de Notion al backlog local
+
+*Ejecución*
+/plan\_tasks — lista tareas elegibles según task\_mode
+/do\_task <task\_id> — ejecuta tarea concreta en branch task/<id>
+/do\_next — ejecuta la siguiente tarea elegible
+/stop — cancela la tarea en curso
+/resume [run\_id] — reanuda una corrida pausada
+
+*Observabilidad*
+/status [run\_id] — dashboard del run activo/último
+/plan [run\_id] — subtareas del run
+/logs [run\_id] — eventos recientes del run
+/diff — diff local actual
+
+*LLM Routing*
+/models — lista modelos disponibles y modo actual
+/model auto — vuelve a selección automática
+/model <key> — fija modelo para este chat
+/runwith <key> <tarea> — ejecuta tarea puntual con modelo específico
+/modelstats — métricas de uso por modelo
+
+/help — muestra este mensaje"""
+
+
+async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ALLOWED_USER:
+        return
+    await update.message.reply_text(_HELP_TEXT, parse_mode="Markdown", **_no_preview_kwargs())
+
+
+
     global _bot_app
     _bot_app = ApplicationBuilder().token(TOKEN).build()
+    _bot_app.add_handler(CommandHandler("help", handle_help))
     _bot_app.add_handler(CommandHandler("workon", handle_workon))
     _bot_app.add_handler(CommandHandler("plan_tasks", handle_plan_tasks))
     _bot_app.add_handler(CommandHandler("addtask", handle_addtask))
