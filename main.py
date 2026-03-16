@@ -193,16 +193,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return
 
                 # --- Push + PR al finalizar ---
+                def _get_default_branch(repo) -> str:
+                    try:
+                        return repo.git.symbolic_ref("refs/remotes/origin/HEAD").split("/")[-1]
+                    except Exception:
+                        return "main"
+
                 def _push_and_pr():
                     import git as _git
                     repo = _git.Repo(str(ws_now["repo_path"]))
                     branch = repo.active_branch.name
+                    base = _get_default_branch(repo)
                     repo.git.add(A=True)
                     has_changes = repo.is_dirty(untracked_files=False) or bool(repo.index.diff("HEAD"))
                     if not has_changes:
-                        # Verificar si hay commits adelante de main
                         try:
-                            ahead = int(repo.git.rev_list("--count", "main..HEAD").strip())
+                            ahead = int(repo.git.rev_list("--count", f"{base}..HEAD").strip())
                         except Exception:
                             ahead = 0
                         if not ahead:
@@ -217,7 +223,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         title=f"[{task.id}] {task.title}",
                         body=f"## Resumen\n\n{result[:2000] if result else 'Tarea completada por el agente.'}\n\n---\n_PR generado automáticamente por agent-serve_",
                         head=branch,
-                        base="main",
+                        base=base,
                     )
                     pr["head"] = branch
                     return push_result, pr
