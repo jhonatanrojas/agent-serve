@@ -114,11 +114,25 @@ def run_agent_loop(messages: list, ctx: TaskContext, guard: LoopGuard,
 def run_agent(user_message: str, progress_callback=None,
               mode: str = "auto", manual_model_key: str | None = None) -> str:
     from src.supervisor import run_supervisor
+    from src.intent_classifier import classify_intent
 
     reset()
     log.info("Iniciando agente: %s", user_message[:100])
 
-    result = run_supervisor(user_message, progress_callback)
+    # Mensajes conversacionales/consultas van directo al loop, sin crear workspace/branch
+    intent = classify_intent(user_message)
+    if intent.get("intent") in ("query", "other"):
+        ctx = TaskContext(message=user_message)
+        guard = LoopGuard()
+        memories = load_memory(user_message)
+        system = build_system_prompt(memories)
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_message},
+        ]
+        return run_agent_loop(messages, ctx, guard, progress_callback, mode=mode, manual_model_key=manual_model_key)
+
+    result = run_supervisor(user_message, progress_callback, mode=mode, manual_model_key=manual_model_key)
 
     if result != "__SIMPLE__":
         return result
