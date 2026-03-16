@@ -70,6 +70,30 @@ async def handle_natural_message(
     if kind == "query":
         return False  # delegar a run_agent normal
 
+    # --- do_next: ejecutar tareas pendientes del backlog activo ---
+    if kind == "do_next":
+        try:
+            ws_data = WorkspaceManager().get_active_workspace(chat_id)
+        except Exception:
+            ws_data = None
+        if not ws_data:
+            await notify("⚠️ No hay workspace activo.")
+            return True
+        set_active_repo_path(ws_data["repo_path"])
+        store = TaskStore(ws_data["repo_path"])
+        # Desbloquear tareas bloqueadas por error previo para reintentarlas
+        for item in store.list_items():
+            if item.status == "blocked":
+                store.update_status(item.id, "todo")
+        pending = [i for i in store.list_items() if i.status == "todo"]
+        if not pending:
+            await notify("✅ No hay tareas pendientes en el backlog.")
+            return True
+        await notify(f"▶️ Ejecutando {len(pending)} tarea(s) pendiente(s) secuencialmente...")
+        for item in pending:
+            await run_task_fn(item.id)
+        return True
+
     # --- Resolver repo si viene en el mensaje ---
     ws = None
     if intent.get("repo"):

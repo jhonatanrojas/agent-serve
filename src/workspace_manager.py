@@ -217,6 +217,21 @@ class WorkspaceManager:
         if repo.is_dirty(untracked_files=False):
             raise WorkspaceError("Repositorio con cambios sin commitear; no se puede crear branch de tarea.")
 
+        # Si estamos en una branch task/* anterior, volver a la base del workspace activo
+        current = repo.active_branch.name
+        if current.startswith("task/"):
+            # Buscar la base guardada en workspace_sessions
+            with _conn() as conn:
+                row = conn.execute(
+                    "SELECT active_branch FROM workspace_sessions WHERE repo_path=? LIMIT 1",
+                    (str(self.repo_path),),
+                ).fetchone()
+            base = (row[0] if row else None) or "agent/work"
+            if base in [h.name for h in repo.heads]:
+                repo.heads[base].checkout()
+            elif "agent/work" in [h.name for h in repo.heads]:
+                repo.heads["agent/work"].checkout()
+
         base_branch = repo.active_branch.name
         short_run = run_id.split("-")[0]
         branch_name = f"task/{short_run}-{_slug(task_message)}"

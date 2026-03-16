@@ -18,6 +18,7 @@ Intenciones posibles:
 - "setup_and_task": quiere configurar repo Y agregar tareas en un solo mensaje
 - "confirm": el usuario confirma una acción pendiente ("sí", "dale", "ok", "ejecuta", "adelante")
 - "cancel": el usuario cancela ("no", "cancela", "espera", "para")
+- "do_next": el usuario quiere ejecutar la siguiente tarea pendiente del backlog ("continúa", "siguiente tarea", "ejecuta pendientes", "sigue", "continúa con la tarea", "do next")
 - "query": pregunta sobre estado, tareas, logs, etc.
 - "other": conversación general o no relacionada
 
@@ -33,6 +34,8 @@ Ejemplos:
 - "trabaja en agent-serve y agrega logging" → {"intent":"setup_and_task","repo":"agent-serve","branch":null,"tasks":["agregar logging estructurado"]}
 - "agrega autenticación JWT al endpoint /login" → {"intent":"add_tasks","repo":null,"branch":null,"tasks":["agregar autenticación JWT al endpoint /login"]}
 - "sí, ejecuta" → {"intent":"confirm","repo":null,"branch":null,"tasks":[]}
+- "continúa con la tarea pendiente" → {"intent":"do_next","repo":null,"branch":null,"tasks":[]}
+- "sigue con lo que falta" → {"intent":"do_next","repo":null,"branch":null,"tasks":[]}
 - "¿cuál es el estado?" → {"intent":"query","repo":null,"branch":null,"tasks":[]}"""
 
 
