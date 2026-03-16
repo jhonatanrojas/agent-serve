@@ -11,6 +11,8 @@ from src.supervisor import resume_run
 from src.run_state import get_latest_active_run, get_latest_run
 from src.run_dashboard import build_run_dashboard, build_run_logs, build_run_plan
 from src.tools import git_diff_summary
+from src.llm_registry import models_status_text, get_model
+from src.chat_preferences import get_preference, set_auto, set_manual
 
 load_dotenv()
 
@@ -174,6 +176,90 @@ async def handle_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.application.create_task(_watch_current_task(update, _current_task))
 
 
+async def handle_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ALLOWED_USER:
+        return
+    chat_id = update.effective_chat.id
+    pref = get_preference(chat_id)
+    mode_line = f"\n⚙️ Modo actual: *{pref['mode']}*"
+    if pref["model_key"]:
+        mode_line += f" → `{pref['model_key']}`"
+    await update.message.reply_text(
+        models_status_text() + mode_line,
+        parse_mode="Markdown",
+        **_no_preview_kwargs(),
+    )
+
+
+async def handle_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ALLOWED_USER:
+        return
+    chat_id = update.effective_chat.id
+    arg = context.args[0] if context.args else None
+
+    if not arg:
+        pref = get_preference(chat_id)
+        await update.message.reply_text(
+            f"Uso: /model auto | /model <model_key>\nModo actual: {pref['mode']} {pref['model_key'] or ''}",
+            **_no_preview_kwargs(),
+        )
+        return
+
+    if arg == "auto":
+        set_auto(chat_id)
+        await update.message.reply_text("✅ Modo automático activado.", **_no_preview_kwargs())
+        return
+
+    entry = get_model(arg)
+    if not entry:
+        await update.message.reply_text(f"❌ Modelo `{arg}` no existe. Usa /models para ver la lista.", **_no_preview_kwargs())
+        return
+    if not entry.is_available:
+        await update.message.reply_text(f"❌ Modelo `{arg}` no disponible (falta API key).", **_no_preview_kwargs())
+        return
+
+    set_manual(chat_id, arg)
+    await update.message.reply_text(f"✅ Modelo fijado: `{arg}` ({entry.model})", **_no_preview_kwargs())
+
+
+async def handle_runwith(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global _current_task, _current_run_id
+    if update.effective_user.id != ALLOWED_USER:
+        return
+
+    if _current_task and not _current_task.done():
+        await update.message.reply_text("⏳ Ya hay una tarea en ejecución. Usa /stop para cancelarla.", **_no_preview_kwargs())
+        return
+
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text("Uso: /runwith <model_key> <tarea>", **_no_preview_kwargs())
+        return
+
+    model_key = context.args[0]
+    task_text = " ".join(context.args[1:])
+
+    entry = get_model(model_key)
+    if not entry:
+        await update.message.reply_text(f"❌ Modelo `{model_key}` no existe. Usa /models.", **_no_preview_kwargs())
+        return
+    if not entry.is_available:
+        await update.message.reply_text(f"❌ Modelo `{model_key}` no disponible (falta API key).", **_no_preview_kwargs())
+        return
+
+    await update.message.reply_text(
+        f"🤖 Ejecutando con `{model_key}`: {task_text}\n(usa /stop para cancelar)",
+        **_no_preview_kwargs(),
+    )
+
+    loop = asyncio.get_event_loop()
+
+    def run_sync():
+        return run_agent(task_text, mode="manual", manual_model_key=model_key)
+
+    _current_task = loop.run_in_executor(None, run_sync)
+    context.application.create_task(_watch_current_task(update, _current_task))
+
+
 def main():
     global _bot_app
     _bot_app = ApplicationBuilder().token(TOKEN).build()
@@ -183,6 +269,9 @@ def main():
     _bot_app.add_handler(CommandHandler("resume", handle_resume))
     _bot_app.add_handler(CommandHandler("logs", handle_logs))
     _bot_app.add_handler(CommandHandler("diff", handle_diff))
+    _bot_app.add_handler(CommandHandler("models", handle_models))
+    _bot_app.add_handler(CommandHandler("model", handle_model))
+    _bot_app.add_handler(CommandHandler("runwith", handle_runwith))
     _bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     async def send_scheduled(msg: str):
@@ -194,7 +283,7 @@ def main():
 
     set_send_callback(sync_send)
 
-    print("🚀 Agent server corriendo... (/stop /status /plan /resume /logs /diff)")
+    print("🚀 Agent server corriendo... (/stop /status /plan /resume /logs /diff /models /model /runwith)")
     _bot_app.run_polling(drop_pending_updates=True, allowed_updates=["message"])
 
 
