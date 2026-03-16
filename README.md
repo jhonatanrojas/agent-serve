@@ -17,6 +17,7 @@ Agente autónomo operado por Telegram para tareas de ingeniería de software con
   - policy central de ejecución de tools (allowlist, timeout y truncado de output).
 - Observabilidad operativa por Telegram: `/status`, `/plan`, `/resume`, `/logs`, `/diff`, `/stop`.
 - Mensajes Telegram sin preview de links para evitar “imágenes” automáticas.
+- LLM Routing multi-proveedor: selección automática por rol, fallback ordenado, control manual por chat.
 
 ---
 
@@ -62,7 +63,8 @@ Cuando el supervisor inicia una tarea compleja:
 | `src/supervisor.py` | Orquestación multi-fase, checkpoints/eventos, `resume_run` |
 | `src/run_state.py` | Persistencia de corridas y helpers de consulta de runs |
 | `src/run_dashboard.py` | Dashboard textual, plan y logs por `run_id` |
-| `src/workspace_manager.py` | Workspace/branch aislado por corrida |
+| `src/workspace_manager.py` | Workspace/branch aislado por corrida + `task_mode` persistente |
+| `src/workspace_context.py` | Estado global del `repo_path` activo por sesión |
 | `src/git_gate.py` | Reglas por branch para commit/push/aprobación |
 | `src/repomap.py` | Mapa persistente del repositorio |
 | `src/recovery_agent.py` | Clasificación de fallos y estrategia retry/pause |
@@ -72,6 +74,14 @@ Cuando el supervisor inicia una tarea compleja:
 | `src/shell_policy.py` | Policy central de tools (allowlist/timeout/output) |
 | `src/executor.py` | Ejecución de tools aplicando policy + guardrails |
 | `src/tools.py` | Registro de tools locales + MCP + git seguro |
+| `src/repo_manager.py` | Manejo de branches `task/*` por `task_id` |
+| `src/work_item.py` | Modelo unificado de tarea (local + Notion) con deps y metadata |
+| `src/task_store.py` | Almacenamiento local de tareas en `.agent_tasks/tasks.json` |
+| `src/task_queue.py` | Cola secuencial con bloqueo por dependencias |
+| `src/task_source_router.py` | Enrutador de fuente de tareas: `local`/`notion`/`hybrid` |
+| `src/task_file_manager.py` | Crea y actualiza archivos `TASK-XXX.md` por tarea |
+| `src/task_mapper.py` | Mapea páginas Notion → `WorkItem` |
+| `src/task_provider_notion.py` | Consulta y actualiza tareas en Notion via MCP |
 | `src/llm_registry.py` | Registro central de modelos LLM y sus capacidades |
 | `src/llm_selector.py` | Selección de candidatos por rol, task_type y modo |
 | `src/llm_runner.py` | Ejecución con fallback ordenado y métricas |
