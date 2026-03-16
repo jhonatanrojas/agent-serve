@@ -105,7 +105,7 @@ MODELS_REGISTRY: dict[str, ModelEntry] = {
     "codex_mini": ModelEntry(
         key="codex_mini",
         model="openai/codex-mini-latest",
-        priority=3,
+        priority=2,
         supports_tools=True,
         supports_reasoning=False,
         supports_long_context=False,
