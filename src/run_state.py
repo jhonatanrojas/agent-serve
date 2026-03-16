@@ -56,6 +56,21 @@ def _conn() -> sqlite3.Connection:
     _ensure_column(conn, "run_states", "current_subtask_index", "current_subtask_index INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "run_states", "spec", "spec TEXT NOT NULL DEFAULT '{}'")
     _ensure_column(conn, "run_states", "completed_subtasks", "completed_subtasks TEXT NOT NULL DEFAULT '[]'")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS run_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            decision_type TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            details TEXT NOT NULL DEFAULT '{}',
+            cost_estimate REAL NOT NULL DEFAULT 0,
+            risk_level TEXT NOT NULL DEFAULT 'low'
+        )
+        """
+    )
     conn.commit()
     return conn
 
@@ -346,3 +361,56 @@ def get_latest_active_run() -> dict | None:
         if r.get("phase") not in ("done", "failed"):
             return r
     return None
+
+
+def append_decision(run_id: str, phase: str, decision_type: str, actor: str,
+                    details: dict[str, Any] | None = None,
+                    cost_estimate: float = 0,
+                    risk_level: str = "low") -> bool:
+    if not get_run_state(run_id):
+        return False
+    with _conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO run_decisions(run_id, timestamp, phase, decision_type, actor, details, cost_estimate, risk_level)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                _now(),
+                phase,
+                decision_type,
+                actor,
+                json.dumps(details or {}, ensure_ascii=False),
+                float(cost_estimate or 0),
+                risk_level or "low",
+            ),
+        )
+        conn.commit()
+    return True
+
+
+def list_run_decisions(run_id: str, limit: int = 200) -> list[dict]:
+    with _conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT timestamp, phase, decision_type, actor, details, cost_estimate, risk_level
+            FROM run_decisions
+            WHERE run_id=?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (run_id, limit),
+        ).fetchall()
+    out = []
+    for r in rows:
+        out.append({
+            "timestamp": r[0],
+            "phase": r[1],
+            "decision_type": r[2],
+            "actor": r[3],
+            "details": _loads(r[4], {}),
+            "cost_estimate": float(r[5] or 0),
+            "risk_level": r[6] or "low",
+        })
+    return out

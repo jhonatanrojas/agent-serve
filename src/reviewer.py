@@ -185,3 +185,29 @@ def format_review(review: dict) -> str:
         lines.extend(f"  → {s}" for s in review["suggestions"])
 
     return "\n".join(lines)
+
+
+
+def run_self_review(modified_files: list[str], review: dict | None = None) -> dict:
+    review = review or {}
+    risks = []
+    checks = []
+
+    has_source = any(f.endswith((".py", ".js", ".ts", ".tsx", ".jsx")) for f in modified_files)
+    has_tests = any("test" in f.lower() for f in modified_files)
+
+    checks.append("minimal_changes" if len(modified_files) <= 12 else "wide_changes")
+    if has_source and not has_tests:
+        risks.append("No se detectaron cambios en tests junto con cambios de código fuente")
+
+    verdict = review.get("verdict", "SIN REVIEW")
+    if verdict in ("RECHAZADO", "PARCIAL", "ERROR"):
+        risks.append(f"Reviewer no aprobó cambios ({verdict})")
+
+    debt = "low" if len(risks) == 0 else ("medium" if len(risks) == 1 else "high")
+    return {
+        "checks": checks,
+        "risks": risks,
+        "debt_level": debt,
+        "recommendation": "proceed" if debt == "low" else "manual_review",
+    }
