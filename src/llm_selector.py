@@ -35,9 +35,11 @@ def select_candidates(
     """
     if mode == "manual" and manual_model_key:
         entry = get_model(manual_model_key)
-        if entry and entry.is_available:
+        role_uc = ROLE_USE_CASES.get(agent_role or task_type, ["general"])
+        # Solo respetar el modelo manual si soporta el rol actual
+        if entry and entry.is_available and any(uc in entry.use_cases for uc in role_uc):
             return [entry]
-        # modelo manual no disponible → fallback a auto silencioso con aviso en caller
+        # modelo manual no soporta este rol → fallback a auto silencioso
 
     role = agent_role or task_type
     use_cases = ROLE_USE_CASES.get(role, ["general"])
@@ -54,5 +56,14 @@ def select_candidates(
             m for m in list_models(only_available=True)
             if not require_tools or m.supports_tools
         ]
+
+    # Si el rol es coder y hay sesión codex activa, ponerlo primero
+    if role == "coder" and mode == "auto":
+        import os
+        codex_session = os.path.exists(os.path.expanduser("~/.codex/auth.json"))
+        if codex_session:
+            codex = get_model("codex_mini")
+            if codex and codex.is_available:
+                candidates = [codex] + [c for c in candidates if c.key != "codex_mini"]
 
     return candidates  # ya ordenados por priority desde list_models

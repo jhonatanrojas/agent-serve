@@ -118,11 +118,10 @@ async def handle_natural_message(
         msg_lower = message.lower()
 
         # Estado del run activo
-        from src.run_state import get_run_state, list_recent_runs
-        runs = list_recent_runs(limit=1)
-        active_run = None
-        if runs:
-            active_run = get_run_state(runs[0]["run_id"])
+        from src.run_state import get_latest_active_run, get_run_state, list_recent_runs
+        active_run = get_latest_active_run()
+        if active_run:
+            active_run = get_run_state(active_run["run_id"])
 
         # Pregunta sobre cambios/diff de una tarea específica
         if active_run and any(w in msg_lower for w in ("cambio", "modific", "hiciste", "realizaste", "diff", "archivo")):
@@ -155,7 +154,7 @@ async def handle_natural_message(
             return True
 
         # Estado de ejecución
-        if active_run and active_run.get("phase") not in ("done", None):
+        if active_run and active_run.get("phase") not in ("done", "failed", None):
             from datetime import datetime, timezone
             updated_at = active_run.get("updated_at", "")
             stale = False
@@ -183,7 +182,6 @@ async def handle_natural_message(
 
         # Backlog de tareas
         if ws_data:
-            from src.task_store import TaskStore
             store = TaskStore(ws_data["repo_path"])
             items = store.list_items()
             todo = [i for i in items if i.status == "todo"]
@@ -200,6 +198,35 @@ async def handle_natural_message(
             await notify("\n".join(lines))
         else:
             await notify("No hay workspace activo ni tareas en ejecución.")
+        return True
+
+    # --- run_task: ejecutar una tarea específica por ID ---
+    if kind == "run_task":
+        task_id = intent.get("task_id")
+        # Fallback: buscar patrón TASK-XXX en el mensaje original
+        if not task_id:
+            import re
+            m = re.search(r"TASK-\d+", message, re.IGNORECASE)
+            if m:
+                task_id = m.group(0).upper()
+        if not task_id:
+            await notify("⚠️ No pude identificar el ID de la tarea. Usa el formato `TASK-XXX`.")
+            return True
+        try:
+            ws_data = WorkspaceManager().get_active_workspace(chat_id)
+        except Exception:
+            ws_data = None
+        if not ws_data:
+            await notify("⚠️ No hay workspace activo.")
+            return True
+        set_active_repo_path(ws_data["repo_path"])
+        store = TaskStore(ws_data["repo_path"])
+        item = store.get_item(task_id)
+        if not item:
+            await notify(f"⚠️ No encontré `{task_id}` en el backlog.")
+            return True
+        await notify(f"▶️ Ejecutando `{task_id}`: {item.title}")
+        await run_task_fn(task_id)
         return True
 
     # --- do_next: ejecutar tareas pendientes del backlog activo ---
@@ -221,9 +248,10 @@ async def handle_natural_message(
         if not pending:
             await notify("✅ No hay tareas pendientes en el backlog.")
             return True
-        await notify(f"▶️ Ejecutando {len(pending)} tarea(s) pendiente(s) secuencialmente...")
-        for item in pending:
-            await run_task_fn(item.id)
+        item = pending[0]
+        remaining = len(pending) - 1
+        await notify(f"▶️ Ejecutando `{item.id}`: {item.title}" + (f"\n_(quedan {remaining} más en el backlog)_" if remaining else ""))
+        await run_task_fn(item.id)
         return True
 
     # --- Resolver repo si viene en el mensaje ---

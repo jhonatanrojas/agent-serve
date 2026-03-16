@@ -110,8 +110,8 @@ MODELS_REGISTRY: dict[str, ModelEntry] = {
         supports_reasoning=False,
         supports_long_context=False,
         use_cases=["coder", "tests"],
-        enabled=True,
-        notes="OpenAI Codex — usa OPENAI_API_KEY (LiteLLM) o sesión CLI (~/.codex/auth.json)",
+        enabled=True,  # disponible via OPENAI_API_KEY o sesión CLI (~/.codex/auth.json)
+        notes="OpenAI Codex — requiere OPENAI_API_KEY o sesión CLI",
     ),
 }
 

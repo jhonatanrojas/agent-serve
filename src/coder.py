@@ -14,9 +14,11 @@ _CODER_ALLOWED_TOOLS = {
     "read_file", "write_file", "create_spec",
     "git_pull", "git_push",
     # Serena tools para edición semántica
-    "read_file", "create_text_file", "replace_content",
+    "create_text_file", "replace_content",
     "find_file", "list_dir", "find_symbol",
     "insert_after_symbol", "replace_symbol_body",
+    # Codex CLI para implementación compleja
+    "codex_exec",
 }
 
 _CODER_TOOLS = [t for t in TOOLS if t["function"]["name"] in _CODER_ALLOWED_TOOLS]

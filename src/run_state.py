@@ -71,7 +71,40 @@ EVENT_TYPES = {
     "guardrail_triggered",
     "run_paused",
     "run_resumed",
+    "run_failed",
 }
+
+STALE_RUN_MINUTES = int(os.getenv("AGENT_STALE_RUN_MINUTES", "30"))
+
+
+def cleanup_stale_runs() -> list[str]:
+    """Marca como 'failed' runs activos sin actividad o con 0 eventos."""
+    from datetime import datetime, timezone
+    stale_ids = []
+    for run in list_recent_runs(limit=100):
+        if run.get("phase") in ("done", "failed", None):
+            continue
+        rid = run["run_id"]
+        # Sin eventos: run zombie (nunca arrancó realmente)
+        if len(run.get("events", [])) == 0:
+            append_event(rid, "run_failed", "failed", {"reason": "stale: 0 events, zombie run"})
+            update_run_state(rid, phase="failed")
+            stale_ids.append(rid)
+            continue
+        # Con eventos pero sin actividad por más de STALE_RUN_MINUTES
+        updated_at = run.get("updated_at", "")
+        try:
+            last = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            age_mins = (datetime.now(timezone.utc) - last).total_seconds() / 60
+        except Exception:
+            continue
+        if age_mins > STALE_RUN_MINUTES:
+            append_event(rid, "run_failed", "failed", {"reason": f"stale: no activity for {int(age_mins)}m"})
+            update_run_state(rid, phase="failed")
+            stale_ids.append(rid)
+    return stale_ids
 
 
 def _build_event(event_type: str, phase: str, details: dict[str, Any] | None = None) -> dict:
@@ -301,6 +334,6 @@ def get_latest_run() -> dict | None:
 def get_latest_active_run() -> dict | None:
     runs = list_recent_runs(50)
     for r in runs:
-        if r.get("phase") != "done":
+        if r.get("phase") not in ("done", "failed"):
             return r
-    return runs[0] if runs else None
+    return None

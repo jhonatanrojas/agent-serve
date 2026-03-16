@@ -10,6 +10,7 @@ from src.repo_manager import RepoManager
 from src.run_dashboard import build_run_dashboard, build_run_logs, build_run_plan
 from src.run_state import get_latest_active_run, get_latest_run
 from src.scheduler import set_send_callback
+from src.notifier import set_send_callback as notifier_set_callback, enable_live, disable_live, is_live
 from src.supervisor import resume_run, run_supervisor
 from src.task_provider_notion import NotionTaskProvider
 from src.task_source_router import TaskSourceRouter
@@ -44,6 +45,17 @@ def _no_preview_kwargs() -> dict:
 def _extract_run_id(text: str) -> str | None:
     m = re.search(r"Run ID:\s*([a-f0-9\-]{8,})", text or "", flags=re.IGNORECASE)
     return m.group(1) if m else None
+
+
+def _make_progress_callback(chat_id):
+    """Construye un progress_callback que envía live updates si el chat tiene live activo."""
+    from src.notifier import live_update
+    from src.executor import set_live_callback
+    def _cb(msg: str):
+        live_update(chat_id, msg)
+    # También enganchar el executor para tool calls
+    set_live_callback(lambda msg: live_update(chat_id, msg))
+    return _cb
 
 
 def _resolve_target_run_id(explicit: str | None = None) -> str | None:
@@ -149,7 +161,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await notify(f"🚀 Ejecutando `{task.id[:8]}`: {task.title}")
         def run_sync():
+            cb = _make_progress_callback(chat_id)
+            # Verificar si hay un run activo para esta tarea → reanudar
+            from src.run_state import list_recent_runs
+            existing = next(
+                (r for r in list_recent_runs(limit=20)
+                 if r.get("phase") not in ("done", "failed")
+                 and task.title[:30] in r.get("source_message", "")),
+                None
+            )
+            if existing:
+                from src.supervisor import resume_run
+                return resume_run(existing["run_id"], progress_callback=cb)
             return run_supervisor(f"{task.title}\n\n{task.description or ''}",
+                                  progress_callback=cb,
                                   mode=pref["mode"], manual_model_key=pref["model_key"])
         global _current_task, _current_run_id
         _current_task = loop.run_in_executor(None, run_sync)
@@ -163,13 +188,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     _current_run_id = maybe_run
                 await notify(result[:1000] if result else "✅ Tarea completada.")
 
+                # No hacer push/PR si la tarea fue pausada o cancelada
+                if result and any(x in result for x in ("⏸️", "⛔", "Cancelado", "pausada", "pausado")):
+                    return
+
                 # --- Push + PR al finalizar ---
                 def _push_and_pr():
                     import git as _git
                     repo = _git.Repo(str(ws_now["repo_path"]))
                     branch = repo.active_branch.name
                     repo.git.add(A=True)
-                    if repo.is_dirty(untracked_files=False) or repo.index.diff("HEAD"):
+                    has_changes = repo.is_dirty(untracked_files=False) or bool(repo.index.diff("HEAD"))
+                    if not has_changes:
+                        # Verificar si hay commits adelante de main
+                        try:
+                            ahead = int(repo.git.rev_list("--count", "main..HEAD").strip())
+                        except Exception:
+                            ahead = 0
+                        if not ahead:
+                            return "sin_cambios", {}
+                    if has_changes:
                         repo.index.commit(f"feat({task.id}): {task.title}")
                     approve_push(branch)
                     push_result = git_push_branch(branch)
@@ -185,7 +223,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return push_result, pr
 
                 push_res, pr = await loop.run_in_executor(None, _push_and_pr)
-                if pr and "url" in pr:
+                if push_res == "sin_cambios":
+                    await notify("⚠️ La tarea no produjo cambios de código. No se creó PR.")
+                elif pr and "url" in pr:
                     await notify(f"🔀 PR creado: {pr['url']}")
                 elif pr and "error" in pr:
                     if "GITHUB_TOKEN no configurado" in pr["error"]:
@@ -301,10 +341,12 @@ async def handle_do_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🚀 Ejecutando tarea {task.id[:8]} en branch `{branch}`", **_no_preview_kwargs())
     loop = asyncio.get_event_loop()
     pref = get_preference(update.effective_chat.id)
+    _cb = _make_progress_callback(update.effective_chat.id)
 
     def run_sync():
         try:
             return run_supervisor(f"{task.title}\n\n{task.description}",
+                                  progress_callback=_cb,
                                   mode=pref["mode"], manual_model_key=pref["model_key"])
         finally:
             pass
@@ -466,13 +508,33 @@ async def handle_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⛔ Señal de cancelación enviada al agente.", **_no_preview_kwargs())
 
 
+async def handle_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ALLOWED_USER:
+        return
+    chat_id = update.effective_chat.id
+    if is_live(chat_id):
+        disable_live(chat_id)
+        await update.message.reply_text("🔴 Modo live **desactivado**.", **_no_preview_kwargs())
+    else:
+        enable_live(chat_id)
+        await update.message.reply_text("🟢 Modo live **activado** — recibirás actualizaciones en tiempo real.\nEnvía `/live` de nuevo para desactivar.", **_no_preview_kwargs())
+
+
 async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ALLOWED_USER:
         return
-    run_id = _resolve_target_run_id(context.args[0] if context.args else None)
+    explicit = context.args[0] if context.args else None
+    run_id = _resolve_target_run_id(explicit)
     if not run_id:
-        await update.message.reply_text("ℹ️ No hay runs registrados.", **_no_preview_kwargs())
+        await update.message.reply_text("ℹ️ No hay tarea activa en este momento.", **_no_preview_kwargs())
         return
+    # Si no se pidió explícitamente, no mostrar runs failed
+    if not explicit:
+        from src.run_state import get_run_state
+        run = get_run_state(run_id)
+        if run and run.get("phase") in ("failed", "done"):
+            await update.message.reply_text("ℹ️ No hay tarea activa en este momento.", **_no_preview_kwargs())
+            return
     await update.message.reply_text(build_run_dashboard(run_id), **_no_preview_kwargs())
 
 
@@ -972,6 +1034,7 @@ def main():
     _bot_app.add_handler(CommandHandler("taskmode", handle_taskmode))
     _bot_app.add_handler(CommandHandler("sync_notion_to_tasks", handle_sync_notion_to_tasks))
     _bot_app.add_handler(CommandHandler("export_tasks", handle_export_tasks))
+    _bot_app.add_handler(CommandHandler("live", handle_live))
     _bot_app.add_handler(CommandHandler("stop", handle_stop))
     _bot_app.add_handler(CommandHandler("status", handle_status))
     _bot_app.add_handler(CommandHandler("plan", handle_plan))
@@ -987,11 +1050,33 @@ def main():
     async def send_scheduled(msg: str):
         await _bot_app.bot.send_message(chat_id=ALLOWED_USER, text=msg, **_no_preview_kwargs())
 
+    _main_loop = asyncio.get_event_loop()
+
     def sync_send(msg: str):
-        loop = asyncio.get_event_loop()
-        asyncio.run_coroutine_threadsafe(send_scheduled(msg), loop)
+        asyncio.run_coroutine_threadsafe(send_scheduled(msg), _main_loop)
 
     set_send_callback(sync_send)
+    notifier_set_callback(sync_send)
+
+    # Limpiar runs stale de sesiones anteriores
+    try:
+        from src.run_state import cleanup_stale_runs
+        stale = cleanup_stale_runs()
+        if stale:
+            print(f"[startup] {len(stale)} run(s) stale marcados como failed: {stale}")
+    except Exception as e:
+        print(f"[startup] cleanup_stale_runs error: {e}")
+
+    # Auto-resume: si hay un run interrumpido con subtareas pendientes, notificar
+    try:
+        from src.run_state import get_latest_active_run
+        interrupted = get_latest_active_run()
+        if interrupted and interrupted.get("next_action") and interrupted.get("phase") not in ("done", "failed"):
+            rid = interrupted["run_id"][:8]
+            task_msg = interrupted.get("source_message", "")[:60]
+            sync_send(f"⚡ Bot reiniciado. Hay una tarea interrumpida: `{task_msg}`\nUsa /resume para reanudar o /stop para cancelar.")
+    except Exception as e:
+        print(f"[startup] auto-resume check error: {e}")
 
     print("🚀 Agent server corriendo... (/workon /plan_tasks /addtask /addtasks /do_task /do_next /tasks /task /taskmode /sync_notion_to_tasks /export_tasks /stop /status /plan /resume /logs /diff /models /model /runwith /modelstats)")
     _bot_app.run_polling(drop_pending_updates=True, allowed_updates=["message"])

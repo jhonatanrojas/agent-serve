@@ -62,6 +62,16 @@ def _slug(text: str) -> str:
     return cleaned[:40] or "task"
 
 
+def _to_ssh_url(url: str) -> str:
+    """Convierte URL HTTPS de GitHub a SSH."""
+    if url.startswith("https://github.com/"):
+        ssh = url.replace("https://github.com/", "git@github.com:", 1)
+        if not ssh.endswith(".git"):
+            ssh += ".git"
+        return ssh
+    return url
+
+
 def _safe_repo_dir(repo_url: str) -> str:
     base = repo_url.rstrip("/").split("/")[-1].replace(".git", "")
     return _slug(base) or "repo"
@@ -111,7 +121,7 @@ class WorkspaceManager:
 
     def set_active_workspace(self, chat_id: str | int, repo_url: str, notion_database_id: str, branch: str) -> dict:
         _validate_no_main(branch)
-        repo_url = (repo_url or "").strip()
+        repo_url = _to_ssh_url((repo_url or "").strip())
         if not repo_url:
             raise WorkspaceError("repo_url es obligatorio")
 

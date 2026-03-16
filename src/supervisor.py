@@ -151,6 +151,23 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
     start_index = _parse_subtask_index(next_action) if next_action.startswith("code_subtask_") else 1
     context = f"Spec:\n{state.spec_summary}\n\nAnálisis:\n{state.analysis}"
 
+    # Al reanudar desde una subtarea intermedia, incluir el diff actual para
+    # que el coder sepa qué ya fue implementado y no repita trabajo.
+    if start_index > 1:
+        try:
+            import subprocess
+            repo_path = workspace.get("repo_path", ".")
+            diff = subprocess.check_output(
+                ["git", "diff", "HEAD"], cwd=repo_path, text=True, timeout=10
+            )
+            status_out = subprocess.check_output(
+                ["git", "status", "--short"], cwd=repo_path, text=True, timeout=10
+            )
+            if diff or status_out:
+                context += f"\n\n⚠️ RESUME: cambios ya implementados en el repo (NO repetir):\n```\n{status_out}{diff[:1500]}\n```"
+        except Exception:
+            pass
+
     if next_action in ("planning", "analyze") or next_action.startswith("code_subtask_"):
         for i, subtask in enumerate(subtasks, 1):
             if i < start_index or subtask in completed_subtasks:
