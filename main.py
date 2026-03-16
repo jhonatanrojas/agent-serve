@@ -702,7 +702,7 @@ async def handle_codexlogin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     def strip_ansi(text):
         return re.sub(r'\x1B\[[0-9;]*[mK]', '', text)
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     proc = subprocess.Popen(
         ["codex", "login", "--device-auth"],
