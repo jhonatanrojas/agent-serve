@@ -12,6 +12,7 @@ _default_allow = {
     "web_search", "sql_query", "list_tables",
     "schedule_task", "list_tasks", "remove_task",
     "list_dir", "find_file", "find_symbol",
+    "read_task_context", "subtask_done",
 }
 
 
