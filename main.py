@@ -111,7 +111,10 @@ async def handle_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import logging
+    logging.getLogger(__name__).info(f"[CMD /status] user_id={update.effective_user.id} allowed={ALLOWED_USER}")
     if update.effective_user.id != ALLOWED_USER:
+        await update.message.reply_text(f"⛔ No autorizado. Tu ID: {update.effective_user.id}", **_no_preview_kwargs())
         return
     run_id = _resolve_target_run_id(context.args[0] if context.args else None)
     if not run_id:

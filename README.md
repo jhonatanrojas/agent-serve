@@ -38,6 +38,21 @@ run_agent()
 
 ---
 
+## Workspace por tarea
+
+El workspace **no es una carpeta separada** — es una branch de git aislada dentro del mismo repo.
+
+Cuando el supervisor inicia una tarea compleja:
+1. `WorkspaceManager.create_or_get_workspace(run_id, task)` crea una branch `task/<run_id_corto>-<slug-de-la-tarea>` desde la branch actual.
+2. Hace checkout a esa branch automáticamente.
+3. El agente trabaja ahí — todos los cambios quedan aislados en esa branch, sin afectar `master` ni otras ramas.
+4. Si el repo tiene cambios sin commitear al momento de crear el workspace, se lanza `WorkspaceError` y la tarea no inicia.
+5. Si el `run_id` ya tiene metadata guardada (reanudación), el workspace existente se reutiliza sin crear una nueva branch.
+
+> Las tareas simples (`run_agent_loop`) no crean workspace — trabajan directo en la branch actual.
+
+---
+
 ## Módulos clave
 
 | Módulo | Responsabilidad |
