@@ -226,7 +226,7 @@ class WorkspaceManager:
             "updated_at": row[5],
         }
 
-    def create_or_get_workspace(self, run_id: str, task_message: str) -> dict:
+    def create_or_get_workspace(self, run_id: str, task_message: str, task_id: str | None = None) -> dict:
         existing = self.get_metadata(run_id)
         if existing:
             return existing
@@ -252,8 +252,8 @@ class WorkspaceManager:
                 repo.heads[target].checkout(force=True)
 
         base_branch = repo.active_branch.name
-        short_run = run_id.split("-")[0]
-        branch_name = f"task/{short_run}-{_slug(task_message)}"
+        branch_suffix = _slug(task_id) if task_id else f"{run_id.split('-')[0]}-{_slug(task_message)}"
+        branch_name = f"task/{branch_suffix}"
 
         _validate_no_main(branch_name)
         if branch_name in [h.name for h in repo.heads]:

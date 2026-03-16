@@ -1,6 +1,9 @@
 import asyncio
 import os
 import re
+import threading
+import time
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
@@ -165,9 +168,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Verificar si hay un run activo para esta tarea → reanudar
             from src.run_state import list_recent_runs
             existing = next(
-                (r for r in list_recent_runs(limit=20)
+                (r for r in list_recent_runs(limit=100)
                  if r.get("phase") not in ("done", "failed")
-                 and task.title[:30] in r.get("source_message", "")),
+                 and (
+                     (r.get("task_id") and r.get("task_id") == task.id)
+                     or task.title[:30] in r.get("source_message", "")
+                 )),
                 None
             )
             if existing:
@@ -175,7 +181,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return resume_run(existing["run_id"], progress_callback=cb)
             return run_supervisor(f"{task.title}\n\n{task.description or ''}",
                                   progress_callback=cb,
-                                  mode=pref["mode"], manual_model_key=pref["model_key"])
+                                  mode=pref["mode"], manual_model_key=pref["model_key"],
+                                  task_id=task.id)
         global _current_task, _current_run_id
         _current_task = loop.run_in_executor(None, run_sync)
 
@@ -205,7 +212,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     branch = repo.active_branch.name
                     base = _get_default_branch(repo)
                     repo.git.add(A=True)
-                    has_changes = repo.is_dirty(untracked_files=False) or bool(repo.index.diff("HEAD"))
+                    changed_files = [
+                        p for p in repo.git.diff("--name-only", "HEAD").splitlines() if p.strip()
+                    ]
+                    code_exts = {".py", ".js", ".ts", ".tsx", ".jsx", ".html", ".css", ".scss", ".json", ".yml", ".yaml", ".toml", ".sh"}
+                    has_source_changes = any(
+                        (f.startswith("src/") or f == "main.py" or f.endswith(tuple(code_exts)))
+                        and not f.endswith(".md")
+                        for f in changed_files
+                    )
+                    has_changes = bool(changed_files)
                     if not has_changes:
                         try:
                             ahead = int(repo.git.rev_list("--count", f"{base}..HEAD").strip())
@@ -213,6 +229,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             ahead = 0
                         if not ahead:
                             return "sin_cambios", {}
+                    if not has_source_changes:
+                        return "sin_cambios_codigo", {"changed_files": changed_files}
                     if has_changes:
                         repo.index.commit(f"feat({task.id}): {task.title}")
                     approve_push(branch)
@@ -229,7 +247,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return push_result, pr
 
                 push_res, pr = await loop.run_in_executor(None, _push_and_pr)
-                if push_res == "sin_cambios":
+                if push_res in ("sin_cambios", "sin_cambios_codigo"):
                     await notify("⚠️ La tarea no produjo cambios de código. No se creó PR.")
                 elif pr and "url" in pr:
                     await notify(f"🔀 PR creado: {pr['url']}")
@@ -1083,6 +1101,50 @@ def main():
             sync_send(f"⚡ Bot reiniciado. Hay una tarea interrumpida: `{task_msg}`\nUsa /resume para reanudar o /stop para cancelar.")
     except Exception as e:
         print(f"[startup] auto-resume check error: {e}")
+
+    # Watchdog de runs activos: cada 5 minutos marca runs sin eventos nuevos por >10 minutos
+    def _start_run_watchdog():
+        from src.run_state import get_latest_active_run, get_run_state, append_event, update_run_state
+        last_event_ts: dict[str, str] = {}
+        notified: set[str] = set()
+
+        def _watch_loop():
+            while True:
+                try:
+                    run = get_latest_active_run()
+                    if run:
+                        data = get_run_state(run["run_id"]) or run
+                        if data.get("phase") not in ("done", "failed"):
+                            rid = data["run_id"]
+                            events = data.get("events", [])
+                            latest_ev = events[-1].get("timestamp", "") if events else ""
+                            if rid not in last_event_ts:
+                                last_event_ts[rid] = latest_ev
+
+                            updated = data.get("updated_at", "")
+                            age_min = 0
+                            try:
+                                last = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+                                if last.tzinfo is None:
+                                    last = last.replace(tzinfo=timezone.utc)
+                                age_min = (datetime.now(timezone.utc) - last).total_seconds() / 60
+                            except Exception:
+                                pass
+
+                            if latest_ev == last_event_ts.get(rid, "") and age_min > 10 and rid not in notified:
+                                sync_send(f"⚠️ Run `{rid[:8]}` sin eventos nuevos por {int(age_min)} min. Marcado como stale.")
+                                append_event(rid, "run_failed", "failed", {"reason": f"watchdog stale >10m ({int(age_min)}m)"})
+                                update_run_state(rid, phase="failed")
+                                notified.add(rid)
+                            else:
+                                last_event_ts[rid] = latest_ev
+                except Exception as e:
+                    print(f"[watchdog] error: {e}")
+                time.sleep(300)
+
+        threading.Thread(target=_watch_loop, daemon=True, name="run-watchdog").start()
+
+    _start_run_watchdog()
 
     print("🚀 Agent server corriendo... (/workon /plan_tasks /addtask /addtasks /do_task /do_next /tasks /task /taskmode /sync_notion_to_tasks /export_tasks /stop /status /plan /resume /logs /diff /models /model /runwith /modelstats)")
     _bot_app.run_polling(drop_pending_updates=True, allowed_updates=["message"])
