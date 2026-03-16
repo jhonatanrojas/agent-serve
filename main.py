@@ -195,8 +195,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     _current_run_id = maybe_run
                 await notify(result[:1000] if result else "✅ Tarea completada.")
 
-                # No hacer push/PR si la tarea fue pausada o cancelada
-                if result and any(x in result for x in ("⏸️", "⛔", "Cancelado", "pausada", "pausado")):
+                # No hacer push/PR si la tarea fue pausada, cancelada o falló el workspace
+                if result and any(x in result for x in ("⏸️", "⛔", "Cancelado", "pausada", "pausado", "❌ No se pudo")):
                     return
 
                 # --- Push + PR al finalizar ---
