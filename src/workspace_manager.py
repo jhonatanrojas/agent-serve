@@ -214,7 +214,7 @@ class WorkspaceManager:
             return existing
 
         repo = git.Repo(str(self.repo_path))
-        if repo.is_dirty(untracked_files=True):
+        if repo.is_dirty(untracked_files=False):
             raise WorkspaceError("Repositorio con cambios sin commitear; no se puede crear branch de tarea.")
 
         base_branch = repo.active_branch.name
