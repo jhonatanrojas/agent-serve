@@ -81,7 +81,9 @@ def run_supervisor(user_message: str, progress_callback=None, existing_run_id: s
     run_id = existing_run_id or create_run_state(initial_phase="planning", source_message=user_message)
 
     try:
-        workspace = WorkspaceManager().create_or_get_workspace(run_id, user_message)
+        from src.workspace_context import get_active_repo_path
+        active_repo = get_active_repo_path()
+        workspace = WorkspaceManager(repo_path=active_repo).create_or_get_workspace(run_id, user_message)
         mark_validation_result(False, workspace["branch_name"])
         append_checkpoint(run_id, "workspace_ready", "planning", workspace)
         notify(f"🌿 Workspace listo en branch `{workspace['branch_name']}`")
